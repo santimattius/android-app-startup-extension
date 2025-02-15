@@ -21,6 +21,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "android-library-template"
+rootProject.name = "android-app-startup-extension"
 include(":app")
 include(":library")
