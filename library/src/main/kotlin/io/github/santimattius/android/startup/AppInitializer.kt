@@ -8,27 +8,40 @@ import android.content.pm.PackageManager.GET_META_DATA
 import android.os.Bundle
 import android.os.Trace
 import io.github.santimattius.android.startup.StartupExtensionLogger.i
+import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
+import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
+import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.concurrent.Volatile
 
-class AppInitializer internal constructor(context: Context) {
+class AppInitializer internal constructor(
+    context: Context,
+    coroutineDispatcher: CoroutineDispatcher? = null
+) {
 
-    private val mInitialized: MutableMap<Class<*>, Any> = HashMap()
-    private val mDiscovered: MutableSet<Class<out StartupInitializer<*>>> = HashSet()
-    private val mContext: Context = context.applicationContext
+    internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher)
+
+    private val initialized: MutableMap<Class<*>, Any> = HashMap()
+    private val syncDiscovered: MutableSet<Class<out StartupSyncInitializer<*>>> = HashSet()
+    private val asyncDiscovered: MutableSet<Class<out StartupAsyncInitializer<*>>> = HashSet()
+
+    private val applicationContext: Context = context.applicationContext
 
     @Suppress("unused")
-    fun <T : Any> initializeComponent(component: Class<out StartupInitializer<T>>): T {
+    fun <T : Any> initializeComponent(component: Class<out StartupSyncInitializer<T>>): T {
         return doInitialize(component)
     }
 
-    fun isEagerlyInitialized(component: Class<out StartupInitializer<*>?>): Boolean {
-        return mDiscovered.contains(component)
+    fun isEagerlyInitialized(component: Class<out StartupSyncInitializer<*>?>): Boolean {
+        return syncDiscovered.contains(component)
     }
 
-    fun <T> doInitialize(component: Class<out StartupInitializer<*>>): T {
+    fun <T> doInitialize(component: Class<out StartupSyncInitializer<*>>): T {
         var result: Any?
         synchronized(sLock) {
-            result = mInitialized[component]
+            result = initialized[component]
             if (result == null) {
                 result = doInitialize<Any>(component, HashSet())
             }
@@ -36,26 +49,53 @@ class AppInitializer internal constructor(context: Context) {
         return result as T
     }
 
+    suspend fun <T> doInitialize(component: Class<out StartupAsyncInitializer<*>>): T {
+        return mutex.withLock {
+            initialized[component] ?: doAsyncInitialize(component, HashSet())
+
+        } as T
+
+    }
+
+    fun discoverAndInitialize(
+        initializationProvider: Class<out InitializationProvider?>
+    ) {
+        try {
+            Trace.beginSection(SECTION_NAME)
+            val provider = ComponentName(applicationContext, initializationProvider)
+            val providerInfo = applicationContext.packageManager
+                .getProviderInfo(provider, GET_META_DATA)
+            val metadata = providerInfo.metaData
+            syncDiscoverAndInitialize(metadata)
+            asyncDiscoverAndInitialize(metadata)
+        } catch (exception: PackageManager.NameNotFoundException) {
+            throw StartupExtensionException(exception)
+        } finally {
+            Trace.endSection()
+        }
+    }
+
     private fun <T> doInitialize(
-        component: Class<out StartupInitializer<*>>,
+        component: Class<out StartupSyncInitializer<*>>,
         initializing: MutableSet<Class<*>>
     ): T {
         Trace.beginSection(component.simpleName)
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
-            return mInitialized.getOrPut(component) {
+            return initialized.getOrPut(component) {
                 initializing.add(component)
                 try {
                     val initializer =
-                        component.getDeclaredConstructor().newInstance() as StartupInitializer<*>
+                        component.getDeclaredConstructor()
+                            .newInstance() as StartupSyncInitializer<*>
 
                     initializer.dependencies()
-                        .filterNot { mInitialized.containsKey(it) }
+                        .filterNot { initialized.containsKey(it) }
                         .forEach { doInitialize<Any>(it, initializing) }
 
                     if (StartupExtensionLogger.DEBUG) i("Initializing ${component.name}")
-                    val result = initializer.create(mContext)
+                    val result = initializer.create(applicationContext)
                     if (StartupExtensionLogger.DEBUG) i("Initialized ${component.name}")
 
                     result
@@ -70,42 +110,81 @@ class AppInitializer internal constructor(context: Context) {
         }
     }
 
-
-    fun discoverAndInitialize(
-        initializationProvider: Class<out InitializationProvider?>
-    ) {
+    private suspend fun <T> doAsyncInitialize(
+        component: Class<out StartupAsyncInitializer<*>>,
+        initializing: MutableSet<Class<*>>
+    ): T {
+        Trace.beginSection(component.simpleName)
         try {
-            Trace.beginSection(SECTION_NAME)
-            val provider = ComponentName(mContext, initializationProvider)
-            val providerInfo = mContext.packageManager
-                .getProviderInfo(provider, GET_META_DATA)
-            val metadata = providerInfo.metaData
-            discoverAndInitialize(metadata)
-        } catch (exception: PackageManager.NameNotFoundException) {
-            throw StartupExtensionException(exception)
+            require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
+
+            return initialized.getOrPut(component) {
+                initializing.add(component)
+                try {
+                    val initializer =
+                        component.getDeclaredConstructor()
+                            .newInstance() as StartupAsyncInitializer<*>
+
+                    initializer.dependencies()
+                        .filterNot { initialized.containsKey(it) }
+                        .forEach { doAsyncInitialize<Any>(it, initializing) }
+
+                    if (StartupExtensionLogger.DEBUG) i("Initializing ${component.name}")
+                    val result = initializer.create(applicationContext)
+                    if (StartupExtensionLogger.DEBUG) i("Initialized ${component.name}")
+
+                    result
+                } catch (throwable: Throwable) {
+                    throw StartupExtensionException(throwable)
+                } finally {
+                    initializing.remove(component)
+                }
+            } as T
         } finally {
             Trace.endSection()
         }
     }
 
-    private fun discoverAndInitialize(metadata: Bundle) {
+    private fun syncDiscoverAndInitialize(metadata: Bundle) {
         val initializing = mutableSetOf<Class<*>>()
 
-        mDiscovered.addAll(
+        syncDiscovered.addAll(
             metadata.keySet()
-                .filter { key -> metadata.getString(key) == "androidx.startup" }
+                .filter { key -> metadata.getString(key) == "sync-initializer" }
                 .mapNotNull { key ->
                     try {
                         Class.forName(key)
-                            .takeIf { StartupInitializer::class.java.isAssignableFrom(it) }
-                            ?.let { it as Class<out StartupInitializer<*>> }
+                            .takeIf { StartupSyncInitializer::class.java.isAssignableFrom(it) }
+                            ?.let { it as Class<out StartupSyncInitializer<*>> }
                             ?.also { if (StartupExtensionLogger.DEBUG) i("Discovered $key") }
                     } catch (e: ClassNotFoundException) {
                         throw StartupExtensionException(e)
                     }
                 }
         )
-        mDiscovered.forEach { doInitialize<Any>(it, initializing) }
+        syncDiscovered.forEach { doInitialize(it, initializing) }
+    }
+
+    private fun asyncDiscoverAndInitialize(metadata: Bundle) {
+        val initializing = mutableSetOf<Class<*>>()
+
+        asyncDiscovered.addAll(
+            metadata.keySet()
+                .filter { key -> metadata.getString(key) == "async-initializer" }
+                .mapNotNull { key ->
+                    try {
+                        Class.forName(key)
+                            .takeIf { StartupAsyncInitializer::class.java.isAssignableFrom(it) }
+                            ?.let { it as Class<out StartupAsyncInitializer<*>> }
+                            ?.also { if (StartupExtensionLogger.DEBUG) i("Discovered $key") }
+                    } catch (e: ClassNotFoundException) {
+                        throw StartupExtensionException(e)
+                    }
+                }
+        )
+        asyncDiscovered.forEach { initializer ->
+            coroutinesEngine.launchStartJob { doAsyncInitialize<Any>(initializer, initializing) }
+        }
     }
 
 
@@ -118,6 +197,7 @@ class AppInitializer internal constructor(context: Context) {
         private var sInstance: AppInitializer? = null
 
         private val sLock = Any()
+        private val mutex = Mutex()
 
         fun getInstance(context: Context): AppInitializer {
             if (sInstance == null) {
@@ -130,11 +210,6 @@ class AppInitializer internal constructor(context: Context) {
             return sInstance!!
         }
 
-        /**
-         * Sets an [AppInitializer] delegate. Useful in the context of testing.
-         *
-         * @param delegate The instance of [AppInitializer] to be used as a delegate.
-         */
         fun setDelegate(delegate: AppInitializer) {
             synchronized(sLock) {
                 sInstance = delegate

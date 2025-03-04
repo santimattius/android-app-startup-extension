@@ -1,14 +1,14 @@
-package io.github.santimattius.android.startup
+package io.github.santimattius.android.startup.initializer
 
 import android.content.Context
 
-interface StartupInitializer<T: Any> {
+interface StartupAsyncInitializer<T: Any> {
     /**
      * Initializes a library component within the application [Context].
      *
      * @param context The application context.
      */
-    fun create(context: Context): T
+    suspend fun create(context: Context): T
 
     /**
      * Gets a list of this initializer's dependencies.
@@ -19,5 +19,5 @@ interface StartupInitializer<T: Any> {
      *
      * @return A list of initializer dependencies.
      */
-    fun dependencies(): List<Class<out StartupInitializer<*>>> = emptyList()
+    fun dependencies(): List<Class<out StartupAsyncInitializer<*>>> = emptyList()
 }
