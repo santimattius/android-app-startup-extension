@@ -1,6 +1,6 @@
 ![architecture - Startup Extension Initializer(1)](https://github.com/user-attachments/assets/9d44a786-7638-44de-952a-60059984abda)
 
-
+[![](https://jitpack.io/v/santimattius/android-app-startup-extension.svg)](https://jitpack.io/#santimattius/android-app-startup-extension)
 # App Startup Extension
 
 App Startup Extension is a library based on AndroidX App Startup that optimizes component
