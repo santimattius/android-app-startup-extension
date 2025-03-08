@@ -32,8 +32,9 @@ Then, add the dependency in your module-level `build.gradle` file:
 
 ```groovy
 dependencies {
-    implementation "module:${version}"
+    implementation "com.github.santimattius:android-app-startup-extension:${version}"
 }
+
 ```
 
 Replace `version` with the desired library version.
