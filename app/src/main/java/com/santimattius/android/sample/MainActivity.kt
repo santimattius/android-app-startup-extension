@@ -17,7 +17,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.lifecycle.lifecycleScope
 import com.santimattius.android.sample.ui.theme.SampleTheme
+import io.github.santimattius.android.startup.AppStartupInitializer
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -28,6 +31,19 @@ class MainActivity : ComponentActivity() {
                 MainScreen()
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        /* TODO: manual initialization
+        val initializer = AppStartupInitializer.getInstance(this@MainActivity)
+        //Sync
+        initializer.doInitialize<Unit>(SyncTestInitializer::class.java)
+
+        lifecycleScope.launch {
+            initializer.doInitialize<Unit>(AsyncTestInitializer::class.java)
+        }
+        */
     }
 
 }

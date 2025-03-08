@@ -3,12 +3,12 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <application
+        android:name=".MainApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:name=".MainApplication"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Sample"
@@ -18,20 +18,34 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
         <provider
             android:name="io.github.santimattius.android.startup.InitializationProvider"
-            android:authorities="${applicationId}.startup-extension"
+            android:authorities="${applicationId}.app-startup-extension"
             android:exported="false"
             tools:node="merge">
-            <meta-data  android:name="com.santimattius.android.sample.SyncTestInitializer"
+            <meta-data
+                android:name="com.santimattius.android.sample.SyncTestInitializer"
                 android:value="sync-initializer" />
-            <meta-data  android:name="com.santimattius.android.sample.AsyncTestInitializer"
+            <meta-data
+                android:name="com.santimattius.android.sample.AsyncTestInitializer"
                 android:value="async-initializer" />
         </provider>
+
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <!-- This entry makes ExampleLoggerInitializer discoverable. -->
+            <meta-data
+                android:name="com.santimattius.android.sample.migration.ExampleLoggerInitializer"
+                android:value="androidx.startup" />
+        </provider>
+
 
     </application>
 

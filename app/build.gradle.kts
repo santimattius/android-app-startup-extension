@@ -45,6 +45,7 @@ android {
 dependencies {
 
     implementation(project(":core"))
+    implementation("androidx.startup:startup-runtime:1.2.0")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)

@@ -128,7 +128,7 @@ class AppStartupInitializer internal constructor(
         synchronized(sLock) {
             result = initialized[component]
             if (result == null) {
-                result = doInitialize<Any>(component, HashSet())
+                result = doInitialize<T>(component, HashSet())
             }
         }
         return result as T
