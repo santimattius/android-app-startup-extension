@@ -9,15 +9,15 @@ internal object StartupExtensionLogger {
 
     const val DEBUG: Boolean = false
 
-    fun i(message: String) {
+    fun info(message: String) {
         Log.i(TAG, message)
     }
 
-    fun w(message: String) {
+    fun warning(message: String) {
         Log.w(TAG, message)
     }
 
-    fun e(message: String, throwable: Throwable?) {
+    fun error(message: String, throwable: Throwable) {
         Log.e(TAG, message, throwable)
     }
 }

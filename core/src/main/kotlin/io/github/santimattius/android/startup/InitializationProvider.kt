@@ -13,9 +13,9 @@ class InitializationProvider : ContentProvider() {
         if (context != null) {
             val applicationContext = context.applicationContext
             if (applicationContext != null) {
-                AppInitializer.getInstance(context).discoverAndInitialize(javaClass)
+                AppStartupInitializer.getInstance(context).discoverAndInitialize(javaClass)
             } else {
-                StartupExtensionLogger.w("Deferring initialization because `applicationContext` is null.")
+                StartupExtensionLogger.warning("Deferring initialization because `applicationContext` is null.")
             }
         } else {
             throw StartupExtensionException("Context cannot be null")

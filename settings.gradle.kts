@@ -23,4 +23,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "android-app-startup-extension"
 include(":app")
-include(":library")
+include(":core")

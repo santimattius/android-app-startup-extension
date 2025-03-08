@@ -9,7 +9,8 @@ import kotlinx.coroutines.delay
 class AsyncTestInitializer : StartupAsyncInitializer<Unit> {
 
     override suspend fun create(context: Context) {
+        Log.d("AsyncTestInitializer", "AsyncTestInitializer start")
         delay(5000)
-        Log.d("AsyncTestInitializer", "TestInitializer created")
+        Log.d("AsyncTestInitializer", "AsyncTestInitializer end")
     }
 }
