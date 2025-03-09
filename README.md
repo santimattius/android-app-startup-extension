@@ -224,6 +224,6 @@ Contributions are welcome! To contribute to this library, follow these steps:
 ## Contact
 
 If you have questions, issues, or suggestions about this library, feel free
-to [open an issue](https://github.com/santimattius/{{repository}}/issues) on GitHub. We are here to
+to [open an issue](https://github.com/santimattius/android-app-startup-extension/issues) on GitHub. We are here to
 help!
 
