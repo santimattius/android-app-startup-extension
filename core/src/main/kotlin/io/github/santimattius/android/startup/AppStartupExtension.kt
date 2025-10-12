@@ -51,15 +51,16 @@ suspend fun AppStartupInitializer.onAppStartupLaunched(block: suspend (AppStartu
 /**
  * Checks if all jobs started by the [AppStartupInitializer] are completed.
  *
- * This function iterates through the list of start jobs managed by the [AppStartupInitializer]'s
- * [coroutinesEngine] and determines if any of them are still active.
- * A job is considered "done" when it is no longer active (i.e., it has completed or been cancelled).
+ * This function provides a non-suspending way to query the status of the startup jobs.
+ * It iterates through the jobs managed by the [AppStartupInitializer]'s
+ * [coroutinesEngine] and checks if any of them are still active.
  *
- * @return `true` if all started jobs are done (not active), `false` otherwise.
+ * A job is considered "done" if it is no longer active, meaning it has either
+ * completed successfully, been cancelled, or failed.
  *
+ * @return `true` if all started jobs are done (i.e., not active), `false` otherwise.
  * @see kotlinx.coroutines.Job.isActive
- * @see AppStartupInitializer
- * @see CoroutinesEngine
+ * @see awaitAllStartJobs
  */
 fun AppStartupInitializer.isAllStartedJobsDone(): Boolean {
     return coroutinesEngine.startJobs.none { it.isActive }
