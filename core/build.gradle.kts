@@ -1,7 +1,7 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
-    id("maven-publish")
+    alias(libs.plugins.mavenPublish)
 }
 
 val androidMinSdkVersion: String by project
@@ -10,6 +10,10 @@ val androidTargetSdkVersion: String by project
 val libraryGroupId: String by project
 val libraryArtifactId: String by project
 val libraryVersion: String by project
+
+kotlin {
+    jvmToolchain(17)
+}
 
 android {
     namespace = "com.santimattius.android.core"
@@ -35,9 +39,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
-    }
 }
 
 dependencies {
@@ -49,16 +50,37 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
 }
 
-afterEvaluate {
-    publishing {
-        publications {
-            // Creates a Maven publication called "release".
-            register<MavenPublication>("release") {
-                from(components["release"])
-                groupId = libraryGroupId
-                artifactId = libraryArtifactId
-                version = libraryVersion
+mavenPublishing {
+    publishToMavenCentral()
+
+    signAllPublications()
+
+    coordinates(libraryGroupId, libraryArtifactId, libraryVersion)
+
+    pom {
+        name = "Android App Startup Extension"
+        description =
+            "App Startup Extension is a library based on AndroidX App Startup that optimizes component initialization in Android applications using Kotlin Coroutines."
+        inceptionYear = "2025"
+        url = "https://github.com/santimattius/android-app-startup-extension/"
+        licenses {
+            license {
+                name = "The Apache License, Version 2.0"
+                url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+                distribution = "https://www.apache.org/licenses/LICENSE-2.0.txt"
             }
+        }
+        developers {
+            developer {
+                id = "santiago-mattiauda"
+                name = "Santiago Mattiauda"
+                url = "https://github.com/santimattius"
+            }
+        }
+        scm {
+            url = "https://github.com/santimattius/android-app-startup-extension/"
+            connection = "scm:git:git://github.com/santimattius/android-app-startup-extension.git"
+            developerConnection = "scm:git:ssh://git@github.com/santimattius/android-app-startup-extension.git"
         }
     }
 }

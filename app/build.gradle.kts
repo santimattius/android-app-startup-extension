@@ -7,6 +7,9 @@ plugins {
 val androidMinSdkVersion: String by project
 val androidTargetSdkVersion: String by project
 
+kotlin {
+    jvmToolchain(17)
+}
 android {
     namespace = "com.santimattius.android.sample"
     compileSdk = androidTargetSdkVersion.toInt()
@@ -33,9 +36,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
     }
     buildFeatures {
         compose = true
