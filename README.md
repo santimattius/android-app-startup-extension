@@ -23,7 +23,6 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         mavenCentral()
-        maven { url 'https://jitpack.io' }
     }
 }
 ```
@@ -32,8 +31,7 @@ Then, add the dependency in your module-level `build.gradle` file:
 
 ```groovy
 dependencies {
-    implementation "com.github.santimattius:android-app-startup-extension:${version}"
-}
+    implementation("io.github.santimattius.android:app-startup-extension:${version}")
 
 ```
 
