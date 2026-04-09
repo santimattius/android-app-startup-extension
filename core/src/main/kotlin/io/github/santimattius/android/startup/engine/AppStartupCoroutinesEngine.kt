@@ -1,6 +1,7 @@
 package io.github.santimattius.android.startup.engine
 
 import android.util.Log
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -35,15 +36,17 @@ import kotlin.coroutines.CoroutineContext
  * @property coroutineContext The combined `CoroutineContext` composed of the `supervisorJob` and `dispatcher`.
  * @property startJobs An `ArrayList` holding `Deferred` instances representing the launched startup jobs.
  */
-internal class AppStartupCoroutinesEngine(coroutineDispatcher: CoroutineDispatcher? = null) : CoroutineScope {
+internal class AppStartupCoroutinesEngine(
+    coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
+) : CoroutineScope {
 
-    private var dispatcher: CoroutineDispatcher = coroutineDispatcher ?: Dispatchers.Default
+    private val dispatcher: CoroutineDispatcher = coroutineDispatcher
     private val supervisorJob = SupervisorJob()
 
     override val coroutineContext: CoroutineContext
-        get() =  supervisorJob + dispatcher
+        get() = supervisorJob + dispatcher
 
-    internal val startJobs = arrayListOf<Deferred<*>>()
+    private val startJobs = CopyOnWriteArrayList<Deferred<*>>()
 
     fun <T> launchStartJob(block: suspend CoroutineScope.() -> T) {
         startJobs.add(async { block() })
@@ -51,8 +54,15 @@ internal class AppStartupCoroutinesEngine(coroutineDispatcher: CoroutineDispatch
 
     suspend fun awaitAllStartJobs() {
         Log.d(EXTENSION_NAME, "$TAG - await All Start Jobs ...")
-        startJobs.awaitAll()
-        startJobs.clear()
+        try {
+            startJobs.awaitAll()
+        } finally {
+            startJobs.clear()
+        }
+    }
+
+    fun cancel() {
+        supervisorJob.cancel()
     }
 
     companion object {
