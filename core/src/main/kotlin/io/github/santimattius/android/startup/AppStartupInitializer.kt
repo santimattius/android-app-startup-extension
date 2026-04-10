@@ -11,6 +11,7 @@ import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
@@ -41,7 +42,7 @@ import kotlin.concurrent.Volatile
  */
 class AppStartupInitializer internal constructor(
     context: Context,
-    coroutineDispatcher: CoroutineDispatcher? = null
+    coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
 
     internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher)
