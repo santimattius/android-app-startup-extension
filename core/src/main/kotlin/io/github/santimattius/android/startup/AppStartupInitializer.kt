@@ -11,9 +11,11 @@ import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
 import kotlin.concurrent.Volatile
 
 /**
@@ -44,11 +46,11 @@ class AppStartupInitializer internal constructor(
     coroutineDispatcher: CoroutineDispatcher? = null
 ) {
 
-    internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher)
+    internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher ?: Dispatchers.Default)
 
     private val initialized = ConcurrentHashMap<Class<*>, Any>()
-    private val syncDiscovered: MutableSet<Class<out StartupSyncInitializer<*>>> = HashSet()
-    private val asyncDiscovered: MutableSet<Class<out StartupAsyncInitializer<*>>> = HashSet()
+    private val syncDiscovered: MutableSet<Class<out StartupSyncInitializer<*>>> = CopyOnWriteArraySet()
+    private val asyncDiscovered: MutableSet<Class<out StartupAsyncInitializer<*>>> = CopyOnWriteArraySet()
 
     private val applicationContext: Context = context.applicationContext
 

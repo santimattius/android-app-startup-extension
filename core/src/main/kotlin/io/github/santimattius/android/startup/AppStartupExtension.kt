@@ -63,5 +63,5 @@ suspend fun AppStartupInitializer.onAppStartupLaunched(block: suspend (AppStartu
  * @see awaitAllStartJobs
  */
 fun AppStartupInitializer.isAllStartedJobsDone(): Boolean {
-    return coroutinesEngine.startJobs.none { it.isActive }
+    return coroutinesEngine.areAllStartJobsDone()
 }
