@@ -43,7 +43,7 @@ import kotlin.concurrent.Volatile
  */
 class AppStartupInitializer internal constructor(
     context: Context,
-    coroutineDispatcher: CoroutineDispatcher? = null
+    coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
 
     internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher ?: Dispatchers.Default)

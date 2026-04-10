@@ -34,7 +34,7 @@ import kotlin.coroutines.CoroutineContext
  * @property dispatcher The `CoroutineDispatcher` used for launching coroutines. Defaults to `Dispatchers.Default` if not provided.
  * @property supervisorJob A `SupervisorJob` that manages the lifecycle of all launched jobs.
  * @property coroutineContext The combined `CoroutineContext` composed of the `supervisorJob` and `dispatcher`.
- * @property startJobs An `ArrayList` holding `Deferred` instances representing the launched startup jobs.
+ * @property _startJobs An `ArrayList` holding `Deferred` instances representing the launched startup jobs.
  */
 internal class AppStartupCoroutinesEngine(
     coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
@@ -46,18 +46,20 @@ internal class AppStartupCoroutinesEngine(
     override val coroutineContext: CoroutineContext
         get() = supervisorJob + dispatcher
 
-    private val startJobs = CopyOnWriteArrayList<Deferred<*>>()
+    private val _startJobs = CopyOnWriteArrayList<Deferred<*>>()
+    val startJobs: List<Deferred<*>>
+        get() = _startJobs
 
     fun <T> launchStartJob(block: suspend CoroutineScope.() -> T) {
-        startJobs.add(async { block() })
+        _startJobs.add(async { block() })
     }
 
     suspend fun awaitAllStartJobs() {
         Log.d(EXTENSION_NAME, "$TAG - await All Start Jobs ...")
         try {
-            startJobs.awaitAll()
+            _startJobs.awaitAll()
         } finally {
-            startJobs.clear()
+            _startJobs.clear()
         }
     }
 
