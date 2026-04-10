@@ -54,6 +54,9 @@ class AppStartupInitializer internal constructor(
 
     private val applicationContext: Context = context.applicationContext
 
+    private val syncLock = Any()
+    private val mutex = Mutex()
+
     /**
      * Initializes a component of type [T] using its corresponding [StartupSyncInitializer].
      *
@@ -127,7 +130,7 @@ class AppStartupInitializer internal constructor(
      */
     fun <T> doInitialize(component: Class<out StartupSyncInitializer<*>>): T {
         var result: Any?
-        synchronized(sLock) {
+        synchronized(syncLock) {
             result = initialized[component]
             if (result == null) {
                 result = doInitialize<T>(component, HashSet())
@@ -155,6 +158,8 @@ class AppStartupInitializer internal constructor(
      * @see Mutex
      */
     suspend fun <T> doInitialize(component: Class<out StartupAsyncInitializer<*>>): T {
+        // Fast path: already initialized, no lock needed (ConcurrentHashMap read is safe)
+        initialized[component]?.let { return it as T }
         return mutex.withLock {
             initialized[component] ?: doAsyncInitialize(component, HashSet())
         } as T
@@ -384,8 +389,6 @@ class AppStartupInitializer internal constructor(
      * - Logs debug messages to `StartupExtensionLogger` if debug mode is enabled.
      */
     private fun asyncDiscoverAndInitialize(metadata: Bundle) {
-        val initializing = mutableSetOf<Class<*>>()
-
         asyncDiscovered.addAll(
             metadata.keySet()
                 .filter { key -> metadata.getString(key) == KEY_ASYNC_INITIALIZER }
@@ -401,7 +404,9 @@ class AppStartupInitializer internal constructor(
                 }
         )
         asyncDiscovered.forEach { initializer ->
-            coroutinesEngine.launchStartJob { doAsyncInitialize<Any>(initializer, initializing) }
+            // Each job gets its own initializing set: cycle detection is per-chain,
+            // and sharing a mutable set across concurrent coroutines is a data race.
+            coroutinesEngine.launchStartJob { doAsyncInitialize<Any>(initializer, HashSet()) }
         }
     }
 
@@ -416,7 +421,6 @@ class AppStartupInitializer internal constructor(
         private var sInstance: AppStartupInitializer? = null
 
         private val sLock = Any()
-        private val mutex = Mutex()
 
         /**
          * Provides a singleton instance of [AppStartupInitializer].
