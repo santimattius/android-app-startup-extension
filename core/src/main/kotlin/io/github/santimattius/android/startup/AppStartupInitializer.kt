@@ -233,6 +233,7 @@ class AppStartupInitializer internal constructor(
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
             return initialized.getOrPut(component) {
+                requireConcreteClass(component)
                 initializing.add(component)
                 try {
                     val initializer =
@@ -283,6 +284,7 @@ class AppStartupInitializer internal constructor(
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
             return initialized.getOrPut(component) {
+                requireConcreteClass(component)
                 initializing.add(component)
                 try {
                     val initializer = component.getDeclaredConstructor()
@@ -410,6 +412,23 @@ class AppStartupInitializer internal constructor(
         }
     }
 
+
+    /**
+     * Validates that [component] is a concrete, instantiable class before attempting reflection.
+     *
+     * Throwing early with a clear message avoids the cryptic [InstantiationException] that the
+     * JVM would otherwise produce when [Class.newInstance] is called on an abstract class or interface.
+     *
+     * @throws StartupExtensionException if [component] is abstract or an interface.
+     */
+    private fun requireConcreteClass(component: Class<*>) {
+        if (component.isInterface || java.lang.reflect.Modifier.isAbstract(component.modifiers)) {
+            throw StartupExtensionException(
+                "Cannot initialize ${component.name}: expected a concrete class " +
+                    "but got an abstract class or interface."
+            )
+        }
+    }
 
     companion object {
         private const val KEY_SYNC_INITIALIZER = "sync-initializer"
