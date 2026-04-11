@@ -48,6 +48,13 @@ class AppStartupInitializer internal constructor(
 
     internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher ?: Dispatchers.Default)
 
+    /**
+     * Optional listener that receives a [StartupMetric] after each initializer's [create()][io.github.santimattius.android.startup.initializer.StartupSyncInitializer.create]
+     * completes — whether it succeeds or throws. Set this before startup begins.
+     */
+    @Volatile
+    var metricsListener: StartupMetricsListener? = null
+
     private val initialized = ConcurrentHashMap<Class<*>, Any>()
     private val syncDiscovered: MutableSet<Class<out StartupSyncInitializer<*>>> = CopyOnWriteArraySet()
     private val asyncDiscovered: MutableSet<Class<out StartupAsyncInitializer<*>>> = CopyOnWriteArraySet()
@@ -245,10 +252,23 @@ class AppStartupInitializer internal constructor(
                         .forEach { doInitialize<Any>(it, initializing) }
 
                     StartupExtensionLogger.info("Initializing ${component.name}")
-                    val result = initializer.create(applicationContext)
-                    StartupExtensionLogger.info("Initialized ${component.name}")
-
-                    result
+                    val startMs = System.currentTimeMillis()
+                    var success = false
+                    try {
+                        val result = initializer.create(applicationContext)
+                        success = true
+                        StartupExtensionLogger.info("Initialized ${component.name}")
+                        result
+                    } finally {
+                        metricsListener?.onInitializerCompleted(
+                            StartupMetric(
+                                initializerName = component.simpleName,
+                                durationMs = System.currentTimeMillis() - startMs,
+                                isAsync = false,
+                                success = success,
+                            )
+                        )
+                    }
                 } catch (throwable: Throwable) {
                     throw StartupExtensionException(throwable)
                 } finally {
@@ -296,10 +316,23 @@ class AppStartupInitializer internal constructor(
                         .forEach { doAsyncInitialize<Any>(it, initializing) }
 
                     StartupExtensionLogger.info("Initializing ${component.name}")
-                    val result = initializer.create(applicationContext)
-                    StartupExtensionLogger.info("Initialized ${component.name}")
-
-                    result
+                    val startMs = System.currentTimeMillis()
+                    var success = false
+                    try {
+                        val result = initializer.create(applicationContext)
+                        success = true
+                        StartupExtensionLogger.info("Initialized ${component.name}")
+                        result
+                    } finally {
+                        metricsListener?.onInitializerCompleted(
+                            StartupMetric(
+                                initializerName = component.simpleName,
+                                durationMs = System.currentTimeMillis() - startMs,
+                                isAsync = true,
+                                success = success,
+                            )
+                        )
+                    }
                 } catch (throwable: Throwable) {
                     StartupExtensionLogger.error(
                         "Error initializing ${component.name}: ${throwable.message}",
