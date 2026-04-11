@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.CoroutineContext
 
 /**
@@ -61,6 +62,24 @@ internal class AppStartupCoroutinesEngine(
         } finally {
             _startJobs.clear()
         }
+    }
+
+    /**
+     * Awaits completion of all start jobs within [timeoutMs] milliseconds.
+     *
+     * If the jobs do not complete within the given timeout, [kotlinx.coroutines.TimeoutCancellationException]
+     * is thrown and the job list is **not** cleared — the underlying jobs continue running
+     * in the engine's [SupervisorJob] scope unaffected, since they live in a separate scope
+     * from the awaiting coroutine.
+     *
+     * @throws kotlinx.coroutines.TimeoutCancellationException if the timeout elapses before all jobs finish.
+     */
+    suspend fun awaitAllStartJobs(timeoutMs: Long) {
+        Log.d(EXTENSION_NAME, "$TAG - await All Start Jobs with timeout ${timeoutMs}ms ...")
+        withTimeout(timeoutMs) {
+            _startJobs.awaitAll()
+        }
+        _startJobs.clear()
     }
 
     internal fun areAllStartJobsDone(): Boolean = startJobs.none { it.isActive }

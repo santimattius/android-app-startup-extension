@@ -29,6 +29,18 @@ suspend fun AppStartupInitializer.awaitAllStartJobs() {
 }
 
 /**
+ * Awaits completion of all start jobs within [timeoutMs] milliseconds.
+ *
+ * This is a new overload that does not change the behavior of [awaitAllStartJobs].
+ *
+ * @param timeoutMs Maximum time in milliseconds to wait for all jobs to complete.
+ * @throws kotlinx.coroutines.TimeoutCancellationException if the timeout elapses before all jobs finish.
+ */
+suspend fun AppStartupInitializer.awaitAllStartJobs(timeoutMs: Long) {
+    coroutinesEngine.awaitAllStartJobs(timeoutMs)
+}
+
+/**
  * Executes a given block of code after all App Startup jobs have been completed.
  *
  * This function ensures that all startup tasks registered with the [AppStartupInitializer]
