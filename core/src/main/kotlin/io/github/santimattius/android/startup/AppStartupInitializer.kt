@@ -228,7 +228,7 @@ class AppStartupInitializer internal constructor(
         component: Class<out StartupSyncInitializer<*>>,
         initializing: MutableSet<Class<*>>
     ): T {
-        Trace.beginSection(component.simpleName)
+        Trace.beginSection("$TRACE_PREFIX${component.simpleName}")
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
@@ -279,7 +279,7 @@ class AppStartupInitializer internal constructor(
         component: Class<out StartupAsyncInitializer<*>>,
         initializing: MutableSet<Class<*>>
     ): T {
-        Trace.beginSection(component.simpleName)
+        Trace.beginSection("$TRACE_PREFIX${component.simpleName}")
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
@@ -434,6 +434,7 @@ class AppStartupInitializer internal constructor(
         private const val KEY_SYNC_INITIALIZER = "sync-initializer"
         private const val KEY_ASYNC_INITIALIZER = "async-initializer"
         private const val SECTION_NAME = "StartupExtension"
+        private const val TRACE_PREFIX = "Startup::"
 
         @SuppressLint("StaticFieldLeak")
         @Volatile
