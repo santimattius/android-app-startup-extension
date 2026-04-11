@@ -78,4 +78,21 @@ interface StartupAsyncInitializer<T : Any> {
      *         Returns an empty list if there are no dependencies.
      */
     fun dependencies(): List<Class<out StartupAsyncInitializer<*>>> = emptyList()
+
+    /**
+     * Returns a list of synchronous initializers that must complete before this async initializer's
+     * [create] is invoked.
+     *
+     * Use this to express cross-type dependencies: an async initializer that requires the result of
+     * a sync initializer declares that sync initializer here. The startup manager guarantees that
+     * every class in this list has been fully initialized (its [StartupSyncInitializer.create]
+     * returned) before [create] is called on this instance.
+     *
+     * Each declared class is initialized at most once — if multiple async initializers share a sync
+     * dependency it will not be re-created.
+     *
+     * @return A list of [StartupSyncInitializer] classes that this initializer depends on.
+     *         Returns an empty list if there are no sync dependencies.
+     */
+    fun syncDependencies(): List<Class<out StartupSyncInitializer<*>>> = emptyList()
 }

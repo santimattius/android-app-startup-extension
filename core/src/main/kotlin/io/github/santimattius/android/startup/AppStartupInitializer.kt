@@ -315,6 +315,12 @@ class AppStartupInitializer internal constructor(
                         .filterNot(initialized::containsKey)
                         .forEach { doAsyncInitialize<Any>(it, initializing) }
 
+                    // Resolve cross-type dependencies: sync initializers that must complete
+                    // before this async initializer's create() is invoked.
+                    (initializer as StartupAsyncInitializer<*>).syncDependencies()
+                        .filterNot(initialized::containsKey)
+                        .forEach { doInitialize<Any>(it) }
+
                     StartupExtensionLogger.info("Initializing ${component.name}")
                     val startMs = System.currentTimeMillis()
                     var success = false
@@ -333,6 +339,8 @@ class AppStartupInitializer internal constructor(
                             )
                         )
                     }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (throwable: Throwable) {
                     StartupExtensionLogger.error(
                         "Error initializing ${component.name}: ${throwable.message}",
