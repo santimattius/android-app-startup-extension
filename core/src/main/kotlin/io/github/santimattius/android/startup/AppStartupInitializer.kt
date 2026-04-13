@@ -13,6 +13,7 @@ import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
@@ -315,17 +316,21 @@ class AppStartupInitializer internal constructor(
                         .filterNot(initialized::containsKey)
                         .forEach { doAsyncInitialize<Any>(it, initializing) }
 
+                    val asyncInitializer = (initializer as StartupAsyncInitializer<*>)
                     // Resolve cross-type dependencies: sync initializers that must complete
                     // before this async initializer's create() is invoked.
-                    (initializer as StartupAsyncInitializer<*>).syncDependencies()
+                    asyncInitializer.syncDependencies()
                         .filterNot(initialized::containsKey)
                         .forEach { doInitialize<Any>(it) }
 
                     StartupExtensionLogger.info("Initializing ${component.name}")
                     val startMs = System.currentTimeMillis()
                     var success = false
+                    val initializerDispatcher = asyncInitializer.dispatcher()
                     try {
-                        val result = initializer.create(applicationContext)
+                        val result = withContext(initializerDispatcher) {
+                            asyncInitializer.create(applicationContext)
+                        }
                         success = true
                         StartupExtensionLogger.info("Initialized ${component.name}")
                         result
