@@ -1,7 +1,9 @@
 package io.github.santimattius.android.startup.engine
 
 import android.util.Log
+import io.github.santimattius.android.startup.StartupState
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -9,6 +11,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.CoroutineContext
 
@@ -51,7 +57,13 @@ internal class AppStartupCoroutinesEngine(
     val startJobs: List<Deferred<*>>
         get() = _startJobs
 
+    private val _startupState = MutableStateFlow(StartupState.IDLE)
+
+    /** Hot [StateFlow] that reflects the current startup lifecycle state. */
+    val startupState: StateFlow<StartupState> = _startupState.asStateFlow()
+
     fun <T> launchStartJob(block: suspend CoroutineScope.() -> T) {
+        _startupState.value = StartupState.IN_PROGRESS
         _startJobs.add(async { block() })
     }
 
@@ -59,6 +71,12 @@ internal class AppStartupCoroutinesEngine(
         Log.d(EXTENSION_NAME, "$TAG - await All Start Jobs ...")
         try {
             _startJobs.awaitAll()
+            _startupState.value = StartupState.COMPLETED
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            _startupState.value = StartupState.ERROR
+            throw e
         } finally {
             _startJobs.clear()
         }
@@ -70,16 +88,25 @@ internal class AppStartupCoroutinesEngine(
      * If the jobs do not complete within the given timeout, [kotlinx.coroutines.TimeoutCancellationException]
      * is thrown and the job list is **not** cleared — the underlying jobs continue running
      * in the engine's [SupervisorJob] scope unaffected, since they live in a separate scope
-     * from the awaiting coroutine.
+     * from the awaiting coroutine. State remains [StartupState.IN_PROGRESS] on timeout.
      *
      * @throws kotlinx.coroutines.TimeoutCancellationException if the timeout elapses before all jobs finish.
      */
     suspend fun awaitAllStartJobs(timeoutMs: Long) {
         Log.d(EXTENSION_NAME, "$TAG - await All Start Jobs with timeout ${timeoutMs}ms ...")
-        withTimeout(timeoutMs) {
-            _startJobs.awaitAll()
+        try {
+            withTimeout(timeoutMs) {
+                _startJobs.awaitAll()
+            }
+            _startupState.value = StartupState.COMPLETED
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            _startupState.value = StartupState.ERROR
+            throw e
+        } finally {
+            _startJobs.clear()
         }
-        _startJobs.clear()
     }
 
     internal fun areAllStartJobsDone(): Boolean = startJobs.none { it.isActive }

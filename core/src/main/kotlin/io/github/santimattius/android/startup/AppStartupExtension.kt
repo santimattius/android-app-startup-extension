@@ -1,5 +1,7 @@
 package io.github.santimattius.android.startup
 
+import kotlinx.coroutines.flow.StateFlow
+
 /**
  * Awaits the completion of all start jobs initiated by the [AppStartupInitializer].
  *
@@ -77,3 +79,15 @@ suspend fun AppStartupInitializer.onAppStartupLaunched(block: suspend (AppStartu
 fun AppStartupInitializer.isAllStartedJobsDone(): Boolean {
     return coroutinesEngine.areAllStartJobsDone()
 }
+
+/**
+ * Hot [StateFlow] that reflects the current startup lifecycle.
+ *
+ * Transitions on the happy path: `IDLE → IN_PROGRESS → COMPLETED`.
+ * Transitions on failure: `IDLE → IN_PROGRESS → ERROR`
+ * (sibling jobs continue running under [kotlinx.coroutines.SupervisorJob]).
+ *
+ * @see StartupState
+ */
+val AppStartupInitializer.startupState: StateFlow<StartupState>
+    get() = coroutinesEngine.startupState

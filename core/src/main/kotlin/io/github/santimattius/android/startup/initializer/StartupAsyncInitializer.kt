@@ -1,6 +1,8 @@
 package io.github.santimattius.android.startup.initializer
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 
 /**
  * An interface for asynchronously initializing a component or service during application startup.
@@ -78,4 +80,32 @@ interface StartupAsyncInitializer<T : Any> {
      *         Returns an empty list if there are no dependencies.
      */
     fun dependencies(): List<Class<out StartupAsyncInitializer<*>>> = emptyList()
+
+    /**
+     * Returns a list of synchronous initializers that must complete before this async initializer's
+     * [create] is invoked.
+     *
+     * Use this to express cross-type dependencies: an async initializer that requires the result of
+     * a sync initializer declares that sync initializer here. The startup manager guarantees that
+     * every class in this list has been fully initialized (its [StartupSyncInitializer.create]
+     * returned) before [create] is called on this instance.
+     *
+     * Each declared class is initialized at most once — if multiple async initializers share a sync
+     * dependency it will not be re-created.
+     *
+     * @return A list of [StartupSyncInitializer] classes that this initializer depends on.
+     *         Returns an empty list if there are no sync dependencies.
+     */
+    fun syncDependencies(): List<Class<out StartupSyncInitializer<*>>> = emptyList()
+
+    /**
+     * Returns the [CoroutineDispatcher] on which [create] will be executed.
+     *
+     * Override this to pin the initializer's work to a specific thread pool. For example,
+     * return [Dispatchers.IO] for disk or network I/O, or a dedicated single-thread dispatcher
+     * for components that require thread confinement.
+     *
+     * Defaults to [Dispatchers.Default].
+     */
+    fun dispatcher(): CoroutineDispatcher = Dispatchers.Default
 }
