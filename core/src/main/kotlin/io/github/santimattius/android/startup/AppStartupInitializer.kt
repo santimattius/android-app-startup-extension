@@ -48,6 +48,13 @@ class AppStartupInitializer internal constructor(
 
     internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher ?: Dispatchers.Default)
 
+    /**
+     * Optional listener that receives a [StartupMetric] after each initializer's [create()][io.github.santimattius.android.startup.initializer.StartupSyncInitializer.create]
+     * completes — whether it succeeds or throws. Set this before startup begins.
+     */
+    @Volatile
+    var metricsListener: StartupMetricsListener? = null
+
     private val initialized = ConcurrentHashMap<Class<*>, Any>()
     private val syncDiscovered: MutableSet<Class<out StartupSyncInitializer<*>>> = CopyOnWriteArraySet()
     private val asyncDiscovered: MutableSet<Class<out StartupAsyncInitializer<*>>> = CopyOnWriteArraySet()
@@ -228,7 +235,7 @@ class AppStartupInitializer internal constructor(
         component: Class<out StartupSyncInitializer<*>>,
         initializing: MutableSet<Class<*>>
     ): T {
-        Trace.beginSection(component.simpleName)
+        Trace.beginSection("$TRACE_PREFIX${component.simpleName}")
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
@@ -244,11 +251,24 @@ class AppStartupInitializer internal constructor(
                         .filterNot { initialized.containsKey(it) }
                         .forEach { doInitialize<Any>(it, initializing) }
 
-                    if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Initializing ${component.name}")
-                    val result = initializer.create(applicationContext)
-                    if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Initialized ${component.name}")
-
-                    result
+                    StartupExtensionLogger.info("Initializing ${component.name}")
+                    val startMs = System.currentTimeMillis()
+                    var success = false
+                    try {
+                        val result = initializer.create(applicationContext)
+                        success = true
+                        StartupExtensionLogger.info("Initialized ${component.name}")
+                        result
+                    } finally {
+                        metricsListener?.onInitializerCompleted(
+                            StartupMetric(
+                                initializerName = component.simpleName,
+                                durationMs = System.currentTimeMillis() - startMs,
+                                isAsync = false,
+                                success = success,
+                            )
+                        )
+                    }
                 } catch (throwable: Throwable) {
                     throw StartupExtensionException(throwable)
                 } finally {
@@ -279,7 +299,7 @@ class AppStartupInitializer internal constructor(
         component: Class<out StartupAsyncInitializer<*>>,
         initializing: MutableSet<Class<*>>
     ): T {
-        Trace.beginSection(component.simpleName)
+        Trace.beginSection("$TRACE_PREFIX${component.simpleName}")
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
@@ -295,11 +315,24 @@ class AppStartupInitializer internal constructor(
                         .filterNot(initialized::containsKey)
                         .forEach { doAsyncInitialize<Any>(it, initializing) }
 
-                    if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Initializing ${component.name}")
-                    val result = initializer.create(applicationContext)
-                    if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Initialized ${component.name}")
-
-                    result
+                    StartupExtensionLogger.info("Initializing ${component.name}")
+                    val startMs = System.currentTimeMillis()
+                    var success = false
+                    try {
+                        val result = initializer.create(applicationContext)
+                        success = true
+                        StartupExtensionLogger.info("Initialized ${component.name}")
+                        result
+                    } finally {
+                        metricsListener?.onInitializerCompleted(
+                            StartupMetric(
+                                initializerName = component.simpleName,
+                                durationMs = System.currentTimeMillis() - startMs,
+                                isAsync = true,
+                                success = success,
+                            )
+                        )
+                    }
                 } catch (throwable: Throwable) {
                     StartupExtensionLogger.error(
                         "Error initializing ${component.name}: ${throwable.message}",
@@ -349,7 +382,7 @@ class AppStartupInitializer internal constructor(
                         Class.forName(key)
                             .takeIf { StartupSyncInitializer::class.java.isAssignableFrom(it) }
                             ?.let { it as Class<out StartupSyncInitializer<*>> }
-                            ?.also { if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Discovered $key") }
+                            ?.also { StartupExtensionLogger.info("Discovered $key") }
                     } catch (e: ClassNotFoundException) {
                         throw StartupExtensionException(e)
                     }
@@ -377,7 +410,7 @@ class AppStartupInitializer internal constructor(
      * 2. **Class Loading:** For each filtered key, attempts to load the corresponding class using [Class.forName].
      * 3. **Type Checking:** Verifies if the loaded class implements the [StartupAsyncInitializer] interface.
      * 4. **Casting:** Safely casts the loaded class to `Class<out StartupAsyncInitializer<*>>` if it passes the type check.
-     * 5. **Discovery Logging:** Logs a debug message if [StartupExtensionLogger.DEBUG] is enabled, indicating which class was discovered.
+     * 5. **Discovery Logging:** Logs a debug message if [StartupExtensionLogger.isDebugEnabled] is enabled, indicating which class was discovered.
      * 6. **Initialization Launch:** Launches a coroutine for each discovered initializer using [coroutinesEngine.launchStartJob].
      *    The coroutine executes the [doAsyncInitialize] function to perform the asynchronous initialization.
      * 7. **Concurrent Initialization handling**: uses the `initializing` set to avoid double initialize.
@@ -399,7 +432,7 @@ class AppStartupInitializer internal constructor(
                         Class.forName(key)
                             .takeIf { StartupAsyncInitializer::class.java.isAssignableFrom(it) }
                             ?.let { it as Class<out StartupAsyncInitializer<*>> }
-                            ?.also { if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Discovered $key") }
+                            ?.also { StartupExtensionLogger.info("Discovered $key") }
                     } catch (e: ClassNotFoundException) {
                         throw StartupExtensionException(e)
                     }
@@ -434,6 +467,7 @@ class AppStartupInitializer internal constructor(
         private const val KEY_SYNC_INITIALIZER = "sync-initializer"
         private const val KEY_ASYNC_INITIALIZER = "async-initializer"
         private const val SECTION_NAME = "StartupExtension"
+        private const val TRACE_PREFIX = "Startup::"
 
         @SuppressLint("StaticFieldLeak")
         @Volatile
@@ -452,6 +486,18 @@ class AppStartupInitializer internal constructor(
          *                This should be the application context to avoid memory leaks.
          * @return The singleton instance of [AppStartupInitializer]. It is guaranteed to be non-null.
          */
+        /**
+         * Enables or disables debug logging for the library at runtime.
+         *
+         * Call this before the [InitializationProvider] runs (e.g. in [android.app.Application.attachBaseContext])
+         * to capture discovery and initialization logs. Logging is **disabled by default**.
+         *
+         * @param enabled `true` to activate logging, `false` to silence it.
+         */
+        fun enableDebugLogging(enabled: Boolean) {
+            StartupExtensionLogger.enable(enabled)
+        }
+
         fun getInstance(context: Context): AppStartupInitializer {
             if (sInstance == null) {
                 synchronized(sLock) {
