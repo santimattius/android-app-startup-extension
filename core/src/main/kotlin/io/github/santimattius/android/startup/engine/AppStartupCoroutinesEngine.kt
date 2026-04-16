@@ -63,6 +63,8 @@ internal class AppStartupCoroutinesEngine(
         }
     }
 
+    internal fun areAllStartJobsDone(): Boolean = startJobs.none { it.isActive }
+
     fun cancel() {
         supervisorJob.cancel()
     }

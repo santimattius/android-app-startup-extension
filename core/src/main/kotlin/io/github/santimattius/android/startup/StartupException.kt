@@ -11,7 +11,7 @@ package io.github.santimattius.android.startup
  */
 class StartupExtensionException(
     message: String?, cause: Throwable?
-) : Throwable(message, cause) {
+) : Exception(message, cause) {
 
     constructor(message: String?) : this(message, null)
 
