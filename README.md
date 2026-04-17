@@ -12,6 +12,13 @@ startup time without blocking the main thread.
 - **Synchronous Initialization:** Allows components to be initialized synchronously.
 - **Asynchronous Initialization:** Supports asynchronous component initialization to avoid blocking
   the main thread.
+- **Startup State Lifecycle:** Observe the startup lifecycle (`IDLE → IN_PROGRESS → COMPLETED / ERROR`) via a `StateFlow`.
+- **Timeout Support:** Await all startup jobs with a configurable timeout.
+- **Metrics:** Per-initializer timing and success/failure reporting via a listener.
+- **Debug Logging:** Enable or disable library log output at runtime.
+- **Cross-type Dependencies:** Async initializers can now declare sync initializer dependencies.
+- **Per-initializer Dispatcher:** Each async initializer can specify its own `CoroutineDispatcher`.
+- **R8/ProGuard Rules:** Consumer keep rules are bundled — no manual configuration required.
 
 ## Installation
 
@@ -65,6 +72,34 @@ class AsyncTestInitializer : StartupAsyncInitializer<Unit> {
 }
 ```
 
+#### Per-initializer Dispatcher
+
+Override `dispatcher()` to pin the initializer's `create()` to a specific thread pool. Defaults to `Dispatchers.Default`.
+
+```kotlin
+class DatabaseInitializer : StartupAsyncInitializer<Unit> {
+    override fun dispatcher() = Dispatchers.IO
+
+    override suspend fun create(context: Context) {
+        // runs on Dispatchers.IO
+    }
+}
+```
+
+#### Cross-type Dependencies
+
+An async initializer can declare that certain sync initializers must complete before its `create()` is called by overriding `syncDependencies()`.
+
+```kotlin
+class AnalyticsInitializer : StartupAsyncInitializer<Unit> {
+    override fun syncDependencies() = listOf(ConfigInitializer::class.java)
+
+    override suspend fun create(context: Context) {
+        // ConfigInitializer.create() is guaranteed to have finished
+    }
+}
+```
+
 ### Registering in `AndroidManifest.xml`
 
 ```xml
@@ -100,9 +135,7 @@ coroutineScope.launch {
 
 ### awaitAllStartJobs()
 
-This function suspends execution until all asynchronous initialization tasks started by
-AppStartupInitializer are completed. It ensures that any background
-startup operations, such as data preloading or library initialization, finish before proceeding.
+Suspends until all asynchronous initialization tasks started by `AppStartupInitializer` are completed.
 
 ```kotlin
 val appStartupInitializer = AppStartupInitializer.getInstance(appContext)
@@ -110,7 +143,17 @@ val appStartupInitializer = AppStartupInitializer.getInstance(appContext)
 coroutineScope.launch {
     appStartupInitializer.awaitAllStartJobs()
 }
+```
 
+### awaitAllStartJobs(timeoutMs)
+
+Same as above but throws `TimeoutCancellationException` if the jobs do not complete within the given
+number of milliseconds. The underlying jobs continue running in the background — only the wait is cancelled.
+
+```kotlin
+coroutineScope.launch {
+    appStartupInitializer.awaitAllStartJobs(timeoutMs = 5_000)
+}
 ```
 
 ### onAppStartupLaunched
@@ -127,13 +170,65 @@ coroutineScope.launch {
 ```
 
 ### isAllStartedJobsDone
-Checks if all initialization jobs managed by AppStartupInitializer are completed. It returns true if
-no jobs are currently active, otherwise false.
+
+Checks if all initialization jobs managed by `AppStartupInitializer` are completed. Returns `true` if
+no jobs are currently active, `false` otherwise.
 
 ```kotlin
-
 if (appStartupInitializer.isAllStartedJobsDone()) {
     Log.d("AppStartup", "All startup jobs have finished")
+}
+```
+
+### startupState
+
+A hot `StateFlow<StartupState>` that reflects the current startup lifecycle. Collect it to react to
+state changes without polling.
+
+```
+IDLE → IN_PROGRESS → COMPLETED
+                   ↘ ERROR       (on first job failure; sibling jobs continue)
+```
+
+```kotlin
+coroutineScope.launch {
+    appStartupInitializer.startupState.collect { state ->
+        when (state) {
+            StartupState.COMPLETED -> Log.d("AppStartup", "Startup finished")
+            StartupState.ERROR     -> Log.e("AppStartup", "Startup failed")
+            else -> Unit
+        }
+    }
+}
+```
+
+### Metrics
+
+Register a `StartupMetricsListener` to receive timing and outcome data after each initializer runs.
+Set `metricsListener` before startup begins (e.g. in `Application.attachBaseContext`).
+
+```kotlin
+AppStartupInitializer.getInstance(context).metricsListener =
+    StartupMetricsListener { metric ->
+        Log.d(
+            "Metrics",
+            "${metric.initializerName} took ${metric.durationMs}ms " +
+            "(async=${metric.isAsync}, success=${metric.success})"
+        )
+    }
+```
+
+### Debug Logging
+
+Enable library log output at runtime. Call this before the `InitializationProvider` runs to capture
+discovery and initialization messages. Logging is **disabled by default**.
+
+```kotlin
+class MyApplication : Application() {
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(base)
+        AppStartupInitializer.enableDebugLogging(BuildConfig.DEBUG)
+    }
 }
 ```
 
