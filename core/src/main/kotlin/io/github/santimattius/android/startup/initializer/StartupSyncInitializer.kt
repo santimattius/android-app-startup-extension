@@ -90,4 +90,39 @@ interface StartupSyncInitializer<T : Any> {
      *         [StartupSyncInitializer].
      */
     fun dependencies(): List<Class<out StartupSyncInitializer<*>>> = emptyList()
+
+    /**
+     * Whether the instance returned by [create] should be kept in the initializer registry
+     * after startup completes.
+     *
+     * ## Default behavior — `true` (retain)
+     *
+     * The result of [create] is stored in an internal `ConcurrentHashMap` keyed by the
+     * initializer class and held for the entire lifetime of the application. This is the
+     * correct behavior for components that other parts of the app retrieve post-startup
+     * via `AppStartupInitializer.getInstance(context).initializeComponent(...)`.
+     *
+     * ## Override to `false` (transient)
+     *
+     * Return `false` when [create] produces an object that is only needed **during the
+     * startup sequence itself** — for example, a configuration builder, a migration runner,
+     * or a bootstrapper that has no value once it has executed its side effects. The library
+     * will release the reference from its registry as soon as initialization finishes,
+     * allowing the GC to collect the object.
+     *
+     * ```kotlin
+     * class MigrationInitializer : StartupSyncInitializer<Unit> {
+     *     override fun create(context: Context) {
+     *         DatabaseMigrationRunner(context).runPendingMigrations()
+     *     }
+     *     // Unit result has no value post-startup; release it immediately.
+     *     override fun retainAfterStartup(): Boolean = false
+     * }
+     * ```
+     *
+     * > **Note:** A transient initializer whose result is requested again after startup
+     * > (via `initializeComponent`) will re-execute [create]. Make sure [create] is safe
+     * > to call more than once, or avoid requesting transient initializers post-startup.
+     */
+    fun retainAfterStartup(): Boolean = true
 }

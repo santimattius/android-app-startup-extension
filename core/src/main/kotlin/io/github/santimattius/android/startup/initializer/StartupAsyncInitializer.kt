@@ -108,4 +108,39 @@ interface StartupAsyncInitializer<T : Any> {
      * Defaults to [Dispatchers.Default].
      */
     fun dispatcher(): CoroutineDispatcher = Dispatchers.Default
+
+    /**
+     * Whether the instance returned by [create] should be kept in the initializer registry
+     * after startup completes.
+     *
+     * ## Default behavior — `true` (retain)
+     *
+     * The result of [create] is stored in an internal `ConcurrentHashMap` keyed by the
+     * initializer class and held for the entire lifetime of the application. This is the
+     * correct behavior for components that other parts of the app retrieve post-startup
+     * via `AppStartupInitializer.getInstance(context).initializeComponent(...)`.
+     *
+     * ## Override to `false` (transient)
+     *
+     * Return `false` when [create] produces an object that is only needed **during the
+     * startup sequence itself** — for example, a prefetch job, a cache warmer, or any
+     * component whose value lies entirely in its side effects. The library will release
+     * the reference from its registry as soon as the coroutine finishes, allowing the
+     * GC to collect the object.
+     *
+     * ```kotlin
+     * class CacheWarmupInitializer : StartupAsyncInitializer<Unit> {
+     *     override suspend fun create(context: Context) {
+     *         ImageCache.warmup(context)
+     *     }
+     *     // Result is meaningless after warmup; don't hold it in memory.
+     *     override fun retainAfterStartup(): Boolean = false
+     * }
+     * ```
+     *
+     * > **Note:** A transient initializer whose result is requested again after startup
+     * > (via `initializeComponent`) will re-execute [create]. Make sure [create] is safe
+     * > to call more than once, or avoid requesting transient initializers post-startup.
+     */
+    fun retainAfterStartup(): Boolean = true
 }
