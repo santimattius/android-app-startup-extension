@@ -50,16 +50,25 @@ interface StartupSyncInitializer<T : Any> {
     /**
      * Creates an instance of the desired type [T].
      *
-     * This function is designed to be called on the main (UI) thread.  It handles the
-     * necessary context and resource acquisition required for proper object instantiation.
+     * This function runs **synchronously on the main thread** inside [android.content.ContentProvider.onCreate].
+     * The Android system will trigger an ANR if the main thread is blocked for more than 5 seconds.
      *
-     * @param context The application context, typically obtained from an Activity or Application.
-     *                This context is used for accessing resources, services, and other system-level
-     *                information.
+     * **Do NOT perform any of the following inside `create()`:**
+     * - Disk reads or writes
+     * - Network requests
+     * - Database queries
+     * - Any blocking operation or long-running computation
+     *
+     * If your component requires heavy initialization, implement [StartupAsyncInitializer] instead and
+     * move the blocking work to [StartupAsyncInitializer.dispatcher] (e.g. `Dispatchers.IO`).
+     *
+     * To detect accidental violations at development time, call
+     * `AppStartupInitializer.enableStrictModeCheck(BuildConfig.DEBUG)` from
+     * [android.app.Application.attachBaseContext]. Any blocking I/O will appear as a
+     * `StrictMode` violation in logcat.
+     *
+     * @param context The application context.
      * @return An instance of type [T], fully initialized and ready for use.
-     * @throws IllegalStateException If the necessary resources or dependencies cannot be accessed
-     *                              through the provided context, or if any initialization process fails.
-     * @throws IllegalArgumentException if the provided context is invalid or null.
      */
     @MainThread
     fun create(context: Context): T

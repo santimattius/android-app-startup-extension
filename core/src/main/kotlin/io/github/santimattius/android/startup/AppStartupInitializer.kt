@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.PackageManager.GET_META_DATA
 import android.os.Bundle
+import android.os.StrictMode
 import android.os.Trace
 import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
@@ -196,8 +197,13 @@ class AppStartupInitializer internal constructor(
         try {
             Trace.beginSection(SECTION_NAME)
             val provider = ComponentName(applicationContext, initializationProvider)
-            val providerInfo = applicationContext.packageManager
-                .getProviderInfo(provider, GET_META_DATA)
+            val providerInfo = Trace.beginSection(TRACE_PROVIDER_INFO).let {
+                try {
+                    applicationContext.packageManager.getProviderInfo(provider, GET_META_DATA)
+                } finally {
+                    Trace.endSection()
+                }
+            }
             val metadata = providerInfo.metaData
             syncDiscoverAndInitialize(metadata)
             asyncDiscoverAndInitialize(metadata)
@@ -255,12 +261,27 @@ class AppStartupInitializer internal constructor(
                     StartupExtensionLogger.info("Initializing ${component.name}")
                     val startMs = System.currentTimeMillis()
                     var success = false
+                    // Install a StrictMode policy that detects accidental I/O or disk
+                    // access inside create(). Only active when the caller opts in via
+                    // enableStrictModeCheck(true). The original policy is restored after
+                    // every create() call regardless of outcome.
+                    val savedPolicy = if (strictModeCheckEnabled) {
+                        StrictMode.getThreadPolicy().also {
+                            StrictMode.setThreadPolicy(
+                                StrictMode.ThreadPolicy.Builder()
+                                    .detectAll()
+                                    .penaltyLog()
+                                    .build()
+                            )
+                        }
+                    } else null
                     try {
                         val result = initializer.create(applicationContext)
                         success = true
                         StartupExtensionLogger.info("Initialized ${component.name}")
                         result
                     } finally {
+                        savedPolicy?.let { StrictMode.setThreadPolicy(it) }
                         metricsListener?.onInitializerCompleted(
                             StartupMetric(
                                 initializerName = component.simpleName,
@@ -481,6 +502,33 @@ class AppStartupInitializer internal constructor(
         private const val KEY_ASYNC_INITIALIZER = "async-initializer"
         private const val SECTION_NAME = "StartupExtension"
         private const val TRACE_PREFIX = "Startup::"
+        private const val TRACE_PROVIDER_INFO = "Startup::getProviderInfo"
+
+        /**
+         * When `true`, each [StartupSyncInitializer.create] invocation is wrapped with a
+         * [StrictMode.ThreadPolicy] that calls [StrictMode.ThreadPolicy.Builder.detectAll] and
+         * [StrictMode.ThreadPolicy.Builder.penaltyLog]. Any blocking I/O, network access, or
+         * disk read/write will produce a logcat violation tagged `StrictMode`.
+         *
+         * Enable this in debug builds before the [InitializationProvider] runs — the earliest
+         * safe point is [android.app.Application.attachBaseContext]:
+         *
+         * ```kotlin
+         * override fun attachBaseContext(base: Context) {
+         *     super.attachBaseContext(base)
+         *     AppStartupInitializer.enableStrictModeCheck(BuildConfig.DEBUG)
+         * }
+         * ```
+         *
+         * The original [StrictMode.ThreadPolicy] is always restored after each `create()` call,
+         * so enabling this flag does not affect the app's own StrictMode configuration.
+         */
+        @Volatile
+        private var strictModeCheckEnabled = false
+
+        fun enableStrictModeCheck(enabled: Boolean) {
+            strictModeCheckEnabled = enabled
+        }
 
         @SuppressLint("StaticFieldLeak")
         @Volatile

@@ -9,17 +9,8 @@ import android.net.Uri
 class InitializationProvider : ContentProvider() {
 
     override fun onCreate(): Boolean {
-        val context = context
-        if (context != null) {
-            val applicationContext = context.applicationContext
-            if (applicationContext != null) {
-                AppStartupInitializer.getInstance(context).discoverAndInitialize(javaClass)
-            } else {
-                StartupExtensionLogger.warning("Deferring initialization because `applicationContext` is null.")
-            }
-        } else {
-            throw StartupExtensionException("Context cannot be null")
-        }
+        val context = context ?: throw StartupExtensionException("Context cannot be null")
+        AppStartupInitializer.getInstance(context).discoverAndInitialize(javaClass)
         return true
     }
 
