@@ -86,9 +86,8 @@ internal class AppStartupCoroutinesEngine(
      * Awaits completion of all start jobs within [timeoutMs] milliseconds.
      *
      * If the jobs do not complete within the given timeout, [kotlinx.coroutines.TimeoutCancellationException]
-     * is thrown and the job list is **not** cleared — the underlying jobs continue running
-     * in the engine's [SupervisorJob] scope unaffected, since they live in a separate scope
-     * from the awaiting coroutine. State remains [StartupState.IN_PROGRESS] on timeout.
+     * is thrown. Any jobs still running at that point are explicitly cancelled to avoid zombie
+     * coroutines consuming CPU and I/O in the background with no reference to clean them up.
      *
      * @throws kotlinx.coroutines.TimeoutCancellationException if the timeout elapses before all jobs finish.
      */
@@ -100,6 +99,7 @@ internal class AppStartupCoroutinesEngine(
             }
             _startupState.value = StartupState.COMPLETED
         } catch (e: CancellationException) {
+            _startJobs.filter { it.isActive }.forEach { it.cancel() }
             throw e
         } catch (e: Throwable) {
             _startupState.value = StartupState.ERROR

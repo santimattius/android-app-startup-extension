@@ -5,8 +5,11 @@ import io.github.santimattius.android.startup.initializer.StartupAsyncInitialize
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -66,7 +69,31 @@ class StartupMetricsTest {
 
         val metrics = initializer.metricsFlow.replayCache
         assertEquals(1, metrics.size)
-        assertFalse(metrics.first().success)
+        with(metrics.first()) {
+            assertFalse(success)
+            assertFalse(wasCancelled)
+        }
+    }
+
+    @Test
+    fun `flow marks wasCancelled=true and success=false when initializer is cancelled`() {
+        // runBlocking so the launched coroutine runs eagerly until it suspends at
+        // withContext(dispatcher) { delay(...) }, THEN we cancel and wait for cleanup.
+        runBlocking {
+            val job = launch {
+                runCatching { initializer.doInitialize<String>(HangingAsyncInitializer::class.java) }
+            }
+            yield() // let the launched coroutine reach its first real suspension point
+            job.cancel()
+            job.join()
+        }
+
+        val metrics = initializer.metricsFlow.replayCache
+        assertEquals(1, metrics.size)
+        with(metrics.first()) {
+            assertFalse(success)
+            assertTrue(wasCancelled)
+        }
     }
 
     @Test
@@ -109,13 +136,20 @@ class StartupMetricsTest {
     }
 
     /**
-     * Blocks the IO dispatcher for 100ms so that [System.currentTimeMillis] captures
-     * real wall-clock elapsed time, independent of virtual-time advances in [runTest].
+     * Blocks the IO dispatcher for 100ms so that [System.nanoTime] captures
+     * real monotonic elapsed time, independent of virtual-time advances in [runTest].
      */
     private class SlowAsyncInitializer : StartupAsyncInitializer<String> {
         override suspend fun create(context: Context): String {
             withContext(Dispatchers.IO) { Thread.sleep(100) }
             return "slow-result"
+        }
+    }
+
+    private class HangingAsyncInitializer : StartupAsyncInitializer<String> {
+        override suspend fun create(context: Context): String {
+            kotlinx.coroutines.delay(Long.MAX_VALUE)
+            return "never"
         }
     }
 }
