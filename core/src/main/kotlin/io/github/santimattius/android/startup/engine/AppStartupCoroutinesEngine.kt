@@ -2,7 +2,7 @@ package io.github.santimattius.android.startup.engine
 
 import android.util.Log
 import io.github.santimattius.android.startup.StartupState
-import java.util.concurrent.CopyOnWriteArrayList
+import java.util.Collections
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -14,7 +14,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.CoroutineContext
 
@@ -41,7 +40,9 @@ import kotlin.coroutines.CoroutineContext
  * @property dispatcher The `CoroutineDispatcher` used for launching coroutines. Defaults to `Dispatchers.Default` if not provided.
  * @property supervisorJob A `SupervisorJob` that manages the lifecycle of all launched jobs.
  * @property coroutineContext The combined `CoroutineContext` composed of the `supervisorJob` and `dispatcher`.
- * @property _startJobs An `ArrayList` holding `Deferred` instances representing the launched startup jobs.
+ * @property _startJobs A synchronized [ArrayList] holding [Deferred] instances for launched startup jobs.
+ *   Writes happen only during discovery (single-threaded) and reads only during await — no concurrent
+ *   access in practice, but synchronized for correctness guarantees.
  */
 internal class AppStartupCoroutinesEngine(
     coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
@@ -53,7 +54,7 @@ internal class AppStartupCoroutinesEngine(
     override val coroutineContext: CoroutineContext
         get() = supervisorJob + dispatcher
 
-    private val _startJobs = CopyOnWriteArrayList<Deferred<*>>()
+    private val _startJobs: MutableList<Deferred<*>> = Collections.synchronizedList(ArrayList())
     val startJobs: List<Deferred<*>>
         get() = _startJobs
 
