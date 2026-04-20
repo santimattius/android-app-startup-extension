@@ -21,9 +21,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `IDLE → IN_PROGRESS → ERROR` when a job throws.
 - `StartupState` — enum with four states: `IDLE`, `IN_PROGRESS`, `COMPLETED`, `ERROR`.
 - `StartupMetric` — data class capturing per-initializer timing (`durationMs`), type (`isAsync`),
-  and outcome (`success`).
-- `StartupMetricsListener` — functional interface invoked once per initializer after its `create()`
-  completes, whether it succeeds or throws. Register via `AppStartupInitializer.metricsListener`.
+  and outcome (`success`, `wasCancelled`).
+- `AppStartupInitializer.metricsFlow: SharedFlow<StartupMetric>` — hot SharedFlow that emits after
+  each initializer completes. All values are replayed (`replay = Int.MAX_VALUE`), so late collectors
+  still receive the full startup sequence. Replaces the former `metricsListener` callback.
 - `AppStartupInitializer.enableDebugLogging(enabled: Boolean)` — static method to toggle library
   log output at runtime. Disabled by default. Call before `InitializationProvider` runs (e.g. in
   `Application.attachBaseContext`).
@@ -37,6 +38,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   initialized at most once across all async initializers that share it.
 - `dispatcher(): CoroutineDispatcher` — overridable method to pin `create()` to a specific thread
   pool. Defaults to `Dispatchers.Default`. Return `Dispatchers.IO` for disk or network work.
+- `retainAfterStartup(): Boolean` — overridable on both `StartupSyncInitializer` and
+  `StartupAsyncInitializer`. Return `false` for side-effect-only initializers (migration runners,
+  cache warmers, etc.) to have the library drop the result from its registry immediately after
+  `create()` finishes, allowing GC to collect the object. Defaults to `true`.
 
 #### `AppStartupInitializer`
 
@@ -44,6 +49,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovered and run automatically during startup.
 - `isEagerlyAsyncInitialized(component)` — returns `true` if the given async initializer was
   discovered and launched automatically during startup.
+- `AppStartupInitializer.enableStrictModeCheck(enabled: Boolean)` — static method that wraps each
+  `StartupSyncInitializer.create()` with a `StrictMode.ThreadPolicy` (`detectAll` + `penaltyLog`)
+  to surface accidental blocking I/O on the main thread during development. The original policy is
+  always restored after each call. Disabled by default.
 
 ### Changed
 
@@ -64,6 +73,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Instantiating an abstract class or interface as an initializer now fails immediately with a clear
   `StartupExtensionException` message instead of producing a cryptic `InstantiationException`.
+- Duration measurement switched from `System.currentTimeMillis()` to `System.nanoTime()` for
+  monotonic, wall-clock-independent timing. `durationMs` in `StartupMetric` is now accurate even
+  when the system clock is adjusted during startup.
+- `awaitAllStartJobs(timeoutMs)` now cancels all active jobs on timeout. Previously, jobs continued
+  running as zombies after the wait expired.
+- Class discovery now uses `Class.forName(name, false, context.classLoader)` — the `false` flag
+  prevents unwanted static initialization during the discovery scan, and the explicit classloader
+  ensures correct resolution in multi-classloader environments.
+- `StartupMetric.wasCancelled` correctly distinguishes structured cancellation from real failures:
+  when `true`, `success` is `false` but the event must not be reported as an error to alerting
+  systems.
 
 ### Build
 
