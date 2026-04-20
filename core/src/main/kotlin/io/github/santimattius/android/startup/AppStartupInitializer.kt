@@ -276,7 +276,7 @@ class AppStartupInitializer internal constructor(
                         .forEach { doInitialize<Any>(it, initializing) }
 
                     StartupExtensionLogger.info("Initializing ${component.name}")
-                    val startMs = System.currentTimeMillis()
+                    val startNs = System.nanoTime()
                     var success = false
                     // Install a StrictMode policy that detects accidental I/O or disk
                     // access inside create(). Only active when the caller opts in via
@@ -302,7 +302,7 @@ class AppStartupInitializer internal constructor(
                         metricsBus.publish(
                             StartupMetric(
                                 initializerName = component.simpleName,
-                                durationMs = System.currentTimeMillis() - startMs,
+                                durationMs = (System.nanoTime() - startNs) / 1_000_000L,
                                 isAsync = false,
                                 success = success,
                             )
@@ -367,8 +367,9 @@ class AppStartupInitializer internal constructor(
                         .forEach { doInitialize<Any>(it) }
 
                     StartupExtensionLogger.info("Initializing ${component.name}")
-                    val startMs = System.currentTimeMillis()
+                    val startNs = System.nanoTime()
                     var success = false
+                    var wasCancelled = false
                     val initializerDispatcher = asyncInitializer.dispatcher()
                     try {
                         val result = withContext(initializerDispatcher) {
@@ -377,13 +378,17 @@ class AppStartupInitializer internal constructor(
                         success = true
                         StartupExtensionLogger.info("Initialized ${component.name}")
                         result
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        wasCancelled = true
+                        throw e
                     } finally {
                         metricsBus.publish(
                             StartupMetric(
                                 initializerName = component.simpleName,
-                                durationMs = System.currentTimeMillis() - startMs,
+                                durationMs = (System.nanoTime() - startNs) / 1_000_000L,
                                 isAsync = true,
                                 success = success,
+                                wasCancelled = wasCancelled,
                             )
                         )
                     }
@@ -437,7 +442,7 @@ class AppStartupInitializer internal constructor(
                 .filter { key -> metadata.getString(key) == KEY_SYNC_INITIALIZER }
                 .mapNotNull { key ->
                     try {
-                        Class.forName(key)
+                        Class.forName(key, false, applicationContext.classLoader)
                             .takeIf { StartupSyncInitializer::class.java.isAssignableFrom(it) }
                             ?.let { it as Class<out StartupSyncInitializer<*>> }
                             ?.also { StartupExtensionLogger.info("Discovered $key") }
@@ -487,7 +492,7 @@ class AppStartupInitializer internal constructor(
                 .filter { key -> metadata.getString(key) == KEY_ASYNC_INITIALIZER }
                 .mapNotNull { key ->
                     try {
-                        Class.forName(key)
+                        Class.forName(key, false, applicationContext.classLoader)
                             .takeIf { StartupAsyncInitializer::class.java.isAssignableFrom(it) }
                             ?.let { it as Class<out StartupAsyncInitializer<*>> }
                             ?.also { StartupExtensionLogger.info("Discovered $key") }

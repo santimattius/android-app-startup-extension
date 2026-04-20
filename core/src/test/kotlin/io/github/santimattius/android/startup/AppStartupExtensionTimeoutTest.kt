@@ -79,4 +79,19 @@ class AppStartupExtensionTimeoutTest {
             // Then: timeout did not fire
             assertNull("Expected no TimeoutCancellationException but one was thrown", caught)
         }
+
+    @Test
+    fun `awaitAllStartJobs cancels in-flight jobs when timeout elapses`() =
+        runTest(testDispatcher) {
+            // Given: a job that would run indefinitely
+            initializer.coroutinesEngine.launchStartJob { delay(Long.MAX_VALUE) }
+            val job = initializer.coroutinesEngine.startJobs.first()
+
+            // When: timeout fires
+            runCatching { initializer.awaitAllStartJobs(timeoutMs = 100) }
+
+            // Then: the deferred was cancelled, not left running as a zombie
+            assertNotNull(job)
+            assert(!job.isActive) { "Expected job to be cancelled after timeout, but it is still active" }
+        }
 }
