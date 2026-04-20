@@ -60,11 +60,17 @@ class AppStartupInitializer internal constructor(
      * All emitted values are replayed to late collectors: a collector joining after startup
      * finishes will still receive the full set of metrics from the startup sequence.
      *
+     * **Thread of emission:** metrics are emitted from the initializer's own thread —
+     * the Main Thread for sync initializers, and the initializer's `dispatcher()` for async ones.
+     * [SharedFlow] handles the cross-thread delivery internally: your `collect` lambda always
+     * runs on the dispatcher of the coroutine that launched the collection, so no manual
+     * thread-switching is required on the consumer side.
+     *
      * Collect from a lifecycle-aware scope to avoid retaining UI references in the singleton:
      * ```kotlin
      * lifecycleScope.launch {
      *     AppStartupInitializer.getInstance(context).metricsFlow.collect { metric ->
-     *         updateDashboard(metric)
+     *         updateDashboard(metric) // runs on Main — safe to touch UI here
      *     }
      * }
      * ```
