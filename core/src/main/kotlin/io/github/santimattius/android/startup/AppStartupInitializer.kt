@@ -13,6 +13,7 @@ import io.github.santimattius.android.startup.initializer.StartupAsyncInitialize
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
@@ -50,12 +51,25 @@ class AppStartupInitializer internal constructor(
 
     internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher ?: Dispatchers.Default)
 
+    private val metricsBus = StartupMetricsBus()
+
     /**
-     * Optional listener that receives a [StartupMetric] after each initializer's [create()][io.github.santimattius.android.startup.initializer.StartupSyncInitializer.create]
-     * completes — whether it succeeds or throws. Set this before startup begins.
+     * Hot [SharedFlow] that emits a [StartupMetric] after each initializer completes,
+     * whether it succeeds or throws.
+     *
+     * All emitted values are replayed to late collectors: a collector joining after startup
+     * finishes will still receive the full set of metrics from the startup sequence.
+     *
+     * Collect from a lifecycle-aware scope to avoid retaining UI references in the singleton:
+     * ```kotlin
+     * lifecycleScope.launch {
+     *     AppStartupInitializer.getInstance(context).metricsFlow.collect { metric ->
+     *         updateDashboard(metric)
+     *     }
+     * }
+     * ```
      */
-    @Volatile
-    var metricsListener: StartupMetricsListener? = null
+    val metricsFlow: SharedFlow<StartupMetric> get() = metricsBus.metricsFlow
 
     private val initialized = ConcurrentHashMap<Class<*>, Any>()
     private val syncDiscovered: MutableSet<Class<out StartupSyncInitializer<*>>> = CopyOnWriteArraySet()
@@ -246,13 +260,16 @@ class AppStartupInitializer internal constructor(
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
-            return initialized.getOrPut(component) {
+            var shouldRetain = true
+            val result = initialized.getOrPut(component) {
                 requireConcreteClass(component)
                 initializing.add(component)
                 try {
                     val initializer =
                         component.getDeclaredConstructor()
                             .newInstance() as StartupSyncInitializer<*>
+
+                    shouldRetain = initializer.retainAfterStartup()
 
                     initializer.dependencies()
                         .filterNot { initialized.containsKey(it) }
@@ -282,7 +299,7 @@ class AppStartupInitializer internal constructor(
                         result
                     } finally {
                         savedPolicy?.let { StrictMode.setThreadPolicy(it) }
-                        metricsListener?.onInitializerCompleted(
+                        metricsBus.publish(
                             StartupMetric(
                                 initializerName = component.simpleName,
                                 durationMs = System.currentTimeMillis() - startMs,
@@ -297,6 +314,8 @@ class AppStartupInitializer internal constructor(
                     initializing.remove(component)
                 }
             } as T
+            if (!shouldRetain) initialized.remove(component)
+            return result
         } finally {
             Trace.endSection()
         }
@@ -325,7 +344,8 @@ class AppStartupInitializer internal constructor(
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
-            return initialized.getOrPut(component) {
+            var shouldRetain = true
+            val result = initialized.getOrPut(component) {
                 requireConcreteClass(component)
                 initializing.add(component)
                 try {
@@ -333,11 +353,13 @@ class AppStartupInitializer internal constructor(
                         .newInstance()
                         .also { it as StartupAsyncInitializer<*> }
 
-                    initializer.dependencies()
+                    val asyncInitializer = (initializer as StartupAsyncInitializer<*>)
+                    shouldRetain = asyncInitializer.retainAfterStartup()
+
+                    asyncInitializer.dependencies()
                         .filterNot(initialized::containsKey)
                         .forEach { doAsyncInitialize<Any>(it, initializing) }
 
-                    val asyncInitializer = (initializer as StartupAsyncInitializer<*>)
                     // Resolve cross-type dependencies: sync initializers that must complete
                     // before this async initializer's create() is invoked.
                     asyncInitializer.syncDependencies()
@@ -356,7 +378,7 @@ class AppStartupInitializer internal constructor(
                         StartupExtensionLogger.info("Initialized ${component.name}")
                         result
                     } finally {
-                        metricsListener?.onInitializerCompleted(
+                        metricsBus.publish(
                             StartupMetric(
                                 initializerName = component.simpleName,
                                 durationMs = System.currentTimeMillis() - startMs,
@@ -377,6 +399,8 @@ class AppStartupInitializer internal constructor(
                     initializing.remove(component)
                 }
             } as T
+            if (!shouldRetain) initialized.remove(component)
+            return result
         } finally {
             Trace.endSection()
         }

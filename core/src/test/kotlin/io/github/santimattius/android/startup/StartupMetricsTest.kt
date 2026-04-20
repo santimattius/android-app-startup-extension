@@ -21,22 +21,20 @@ import org.robolectric.annotation.Config
 class StartupMetricsTest {
 
     private val context: Context = mockk(relaxed = true)
-    private val initializer = AppStartupInitializer(context)
+    private lateinit var initializer: AppStartupInitializer
 
     @Before
-    fun resetListener() {
-        initializer.metricsListener = null
+    fun setup() {
+        initializer = AppStartupInitializer(context)
     }
 
     // ── Sync ─────────────────────────────────────────────────────────────────
 
     @Test
-    fun `listener receives metric after sync initializer completes`() {
-        val metrics = mutableListOf<StartupMetric>()
-        initializer.metricsListener = StartupMetricsListener { metrics.add(it) }
-
+    fun `flow receives metric after sync initializer completes`() {
         initializer.doInitialize<String>(SimpleSyncInitializer::class.java)
 
+        val metrics = initializer.metricsFlow.replayCache
         assertEquals(1, metrics.size)
         with(metrics.first()) {
             assertEquals("SimpleSyncInitializer", initializerName)
@@ -49,12 +47,10 @@ class StartupMetricsTest {
     // ── Async ─────────────────────────────────────────────────────────────────
 
     @Test
-    fun `listener receives metric after async initializer completes`() = runTest {
-        val metrics = mutableListOf<StartupMetric>()
-        initializer.metricsListener = StartupMetricsListener { metrics.add(it) }
-
+    fun `flow receives metric after async initializer completes`() = runTest {
         initializer.doInitialize<String>(SimpleAsyncInitializer::class.java)
 
+        val metrics = initializer.metricsFlow.replayCache
         assertEquals(1, metrics.size)
         with(metrics.first()) {
             assertEquals("SimpleAsyncInitializer", initializerName)
@@ -65,32 +61,36 @@ class StartupMetricsTest {
     }
 
     @Test
-    fun `listener receives success=false when initializer throws`() = runTest {
-        val metrics = mutableListOf<StartupMetric>()
-        initializer.metricsListener = StartupMetricsListener { metrics.add(it) }
-
+    fun `flow receives success=false when initializer throws`() = runTest {
         runCatching { initializer.doInitialize<String>(FailingAsyncInitializer::class.java) }
 
+        val metrics = initializer.metricsFlow.replayCache
         assertEquals(1, metrics.size)
         assertFalse(metrics.first().success)
     }
 
     @Test
     fun `durationMs reflects actual execution time`() = runTest {
-        val metrics = mutableListOf<StartupMetric>()
-        initializer.metricsListener = StartupMetricsListener { metrics.add(it) }
-
         initializer.doInitialize<String>(SlowAsyncInitializer::class.java)
 
-        assertTrue("durationMs should be >= 100ms", metrics.first().durationMs >= 100)
+        assertTrue("durationMs should be >= 100ms", initializer.metricsFlow.replayCache.first().durationMs >= 100)
     }
 
     @Test
-    fun `no metric is emitted when listener is null`() {
-        initializer.metricsListener = null
+    fun `flow is empty before any initializer runs`() {
+        assertTrue(initializer.metricsFlow.replayCache.isEmpty())
+    }
 
+    @Test
+    fun `late collector receives all metrics via replay`() = runTest {
         initializer.doInitialize<String>(SimpleSyncInitializer::class.java)
-        // If the listener were called it would throw NPE — just verifying no crash
+        initializer.doInitialize<String>(SimpleAsyncInitializer::class.java)
+
+        // Simulates a collector that subscribes after startup completes
+        val metrics = initializer.metricsFlow.replayCache
+        assertEquals(2, metrics.size)
+        assertFalse(metrics[0].isAsync)
+        assertTrue(metrics[1].isAsync)
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
