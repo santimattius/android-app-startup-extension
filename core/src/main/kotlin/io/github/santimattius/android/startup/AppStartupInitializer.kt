@@ -288,7 +288,7 @@ class AppStartupInitializer internal constructor(
                     // access inside create(). Only active when the caller opts in via
                     // enableStrictModeCheck(true). The original policy is restored after
                     // every create() call regardless of outcome.
-                    val savedPolicy = if (strictModeCheckEnabled) {
+                    val savedPolicy = if (config.strictModeCheckEnabled) {
                         StrictMode.getThreadPolicy().also {
                             StrictMode.setThreadPolicy(
                                 StrictMode.ThreadPolicy.Builder()
@@ -441,8 +441,6 @@ class AppStartupInitializer internal constructor(
      * @see doInitialize
      */
     private fun syncDiscoverAndInitialize(metadata: Bundle) {
-        val initializing = mutableSetOf<Class<*>>()
-
         syncDiscovered.addAll(
             metadata.keySet()
                 .filter { key -> metadata.getString(key) == KEY_SYNC_INITIALIZER }
@@ -457,7 +455,67 @@ class AppStartupInitializer internal constructor(
                     }
                 }
         )
-        syncDiscovered.forEach { doInitialize(it, initializing) }
+
+        val ordered = when (config.syncOrderingStrategy) {
+            is SyncOrderingStrategy.Lazy -> syncDiscovered.toList()
+            is SyncOrderingStrategy.Topological -> topologicalSort(syncDiscovered)
+        }
+
+        val initializing = mutableSetOf<Class<*>>()
+        ordered.forEach { doInitialize(it, initializing) }
+    }
+
+    /**
+     * Sorts [discovered] sync initializers using Kahn's algorithm so that every dependency
+     * appears before the nodes that depend on it.
+     *
+     * Cycle detection is a by-product of Kahn's: if not all nodes are processed the remaining
+     * ones must form a cycle. The exception is thrown before any [StartupSyncInitializer.create]
+     * is called, making the failure state clean and easy to diagnose.
+     *
+     * @throws StartupExtensionException if a cycle is found, naming all participating nodes.
+     */
+    internal fun topologicalSort(
+        discovered: Set<Class<out StartupSyncInitializer<*>>>,
+    ): List<Class<out StartupSyncInitializer<*>>> {
+        val inDegree = mutableMapOf<Class<out StartupSyncInitializer<*>>, Int>()
+        val adjacency = mutableMapOf<Class<out StartupSyncInitializer<*>>, MutableList<Class<out StartupSyncInitializer<*>>>>()
+
+        discovered.forEach { cls ->
+            inDegree.getOrPut(cls) { 0 }
+            adjacency.getOrPut(cls) { mutableListOf() }
+
+            cls.getDeclaredConstructor().newInstance()
+                .let { it as StartupSyncInitializer<*> }
+                .dependencies()
+                .filter { it in discovered }
+                .forEach { dep ->
+                    adjacency.getOrPut(dep) { mutableListOf() }.add(cls)
+                    inDegree[cls] = (inDegree[cls] ?: 0) + 1
+                    inDegree.getOrPut(dep) { 0 }
+                }
+        }
+
+        val queue = ArrayDeque<Class<out StartupSyncInitializer<*>>>()
+        inDegree.filterValues { it == 0 }.keys.forEach { queue.add(it) }
+
+        val sorted = mutableListOf<Class<out StartupSyncInitializer<*>>>()
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            sorted.add(current)
+            adjacency[current]?.forEach { neighbor ->
+                val newDegree = (inDegree[neighbor] ?: 1) - 1
+                inDegree[neighbor] = newDegree
+                if (newDegree == 0) queue.add(neighbor)
+            }
+        }
+
+        if (sorted.size != discovered.size) {
+            val cycleNodes = (discovered - sorted.toSet()).joinToString(", ") { it.simpleName }
+            throw StartupExtensionException("Cycle detected in sync initializers: [$cycleNodes]")
+        }
+
+        return sorted
     }
 
     /**
@@ -507,11 +565,76 @@ class AppStartupInitializer internal constructor(
                     }
                 }
         )
-        asyncDiscovered.forEach { initializer ->
+        val toLaunch = when (config.asyncInitializerStrategy) {
+            is AsyncInitializerStrategy.Concurrent -> asyncDiscovered
+            is AsyncInitializerStrategy.Validated -> asyncValidateAndGetRoots(asyncDiscovered)
+        }
+
+        toLaunch.forEach { initializer ->
             // Each job gets its own initializing set: cycle detection is per-chain,
             // and sharing a mutable set across concurrent coroutines is a data race.
             coroutinesEngine.launchStartJob { doAsyncInitialize<Any>(initializer, HashSet()) }
         }
+    }
+
+    /**
+     * Validates the async-to-async dependency graph (built from [StartupAsyncInitializer.dependencies]
+     * only — [StartupAsyncInitializer.syncDependencies] are excluded because all sync initializers
+     * discovered in the manifest have already completed before this is called) and returns the
+     * **root** nodes: async initializers that no other async initializer depends on.
+     *
+     * Cycle detection uses Kahn's algorithm as a by-product: if not all nodes are processed,
+     * the remaining ones form a cycle. The exception is thrown before any coroutine is launched
+     * or any [StartupAsyncInitializer.create] is called.
+     *
+     * Launching only the roots is sufficient — each root coroutine resolves its transitive
+     * async dependencies recursively via [doAsyncInitialize], eliminating redundant coroutine launches.
+     *
+     * @throws StartupExtensionException if a cycle is found, naming all participating nodes.
+     */
+    internal fun asyncValidateAndGetRoots(
+        discovered: Set<Class<out StartupAsyncInitializer<*>>>,
+    ): Set<Class<out StartupAsyncInitializer<*>>> {
+        val inDegree = mutableMapOf<Class<out StartupAsyncInitializer<*>>, Int>()
+        val adjacency = mutableMapOf<Class<out StartupAsyncInitializer<*>>, MutableList<Class<out StartupAsyncInitializer<*>>>>()
+        val allDeclaredDependencies = mutableSetOf<Class<out StartupAsyncInitializer<*>>>()
+
+        discovered.forEach { cls ->
+            inDegree.getOrPut(cls) { 0 }
+            adjacency.getOrPut(cls) { mutableListOf() }
+
+            cls.getDeclaredConstructor().newInstance()
+                .let { it as StartupAsyncInitializer<*> }
+                .dependencies()
+                .filter { it in discovered }
+                .forEach { dep ->
+                    allDeclaredDependencies.add(dep)
+                    adjacency.getOrPut(dep) { mutableListOf() }.add(cls)
+                    inDegree[cls] = (inDegree[cls] ?: 0) + 1
+                    inDegree.getOrPut(dep) { 0 }
+                }
+        }
+
+        val queue = ArrayDeque<Class<out StartupAsyncInitializer<*>>>()
+        inDegree.filterValues { it == 0 }.keys.forEach { queue.add(it) }
+
+        val processed = mutableListOf<Class<out StartupAsyncInitializer<*>>>()
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            processed.add(current)
+            adjacency[current]?.forEach { neighbor ->
+                val newDegree = (inDegree[neighbor] ?: 1) - 1
+                inDegree[neighbor] = newDegree
+                if (newDegree == 0) queue.add(neighbor)
+            }
+        }
+
+        if (processed.size != discovered.size) {
+            val cycleNodes = (discovered - processed.toSet()).joinToString(", ") { it.simpleName }
+            throw StartupExtensionException("Cycle detected in async initializers: [$cycleNodes]")
+        }
+
+        return discovered - allDeclaredDependencies
     }
 
 
@@ -539,30 +662,30 @@ class AppStartupInitializer internal constructor(
         private const val TRACE_PREFIX = "Startup::"
         private const val TRACE_PROVIDER_INFO = "Startup::getProviderInfo"
 
+        @Volatile
+        private var config: AppStartupConfig = AppStartupConfig.default()
+
         /**
-         * When `true`, each [StartupSyncInitializer.create] invocation is wrapped with a
-         * [StrictMode.ThreadPolicy] that calls [StrictMode.ThreadPolicy.Builder.detectAll] and
-         * [StrictMode.ThreadPolicy.Builder.penaltyLog]. Any blocking I/O, network access, or
-         * disk read/write will produce a logcat violation tagged `StrictMode`.
+         * Applies a configuration block to the library.
          *
-         * Enable this in debug builds before the [InitializationProvider] runs — the earliest
-         * safe point is [android.app.Application.attachBaseContext]:
+         * Call before [InitializationProvider] runs — the earliest safe point is
+         * [android.app.Application.attachBaseContext]:
          *
          * ```kotlin
          * override fun attachBaseContext(base: Context) {
          *     super.attachBaseContext(base)
-         *     AppStartupInitializer.enableStrictModeCheck(BuildConfig.DEBUG)
+         *     AppStartupInitializer.configure {
+         *         debugLoggingEnabled    = BuildConfig.DEBUG
+         *         strictModeCheckEnabled = BuildConfig.DEBUG
+         *         syncOrderingStrategy   = SyncOrderingStrategy.Topological
+         *     }
          * }
          * ```
-         *
-         * The original [StrictMode.ThreadPolicy] is always restored after each `create()` call,
-         * so enabling this flag does not affect the app's own StrictMode configuration.
          */
-        @Volatile
-        private var strictModeCheckEnabled = false
-
-        fun enableStrictModeCheck(enabled: Boolean) {
-            strictModeCheckEnabled = enabled
+        fun configure(block: AppStartupConfig.Builder.() -> Unit) {
+            val newConfig = AppStartupConfig.Builder().apply(block).build()
+            config = newConfig
+            StartupExtensionLogger.enable(newConfig.debugLoggingEnabled)
         }
 
         @SuppressLint("StaticFieldLeak")
@@ -582,18 +705,6 @@ class AppStartupInitializer internal constructor(
          *                This should be the application context to avoid memory leaks.
          * @return The singleton instance of [AppStartupInitializer]. It is guaranteed to be non-null.
          */
-        /**
-         * Enables or disables debug logging for the library at runtime.
-         *
-         * Call this before the [InitializationProvider] runs (e.g. in [android.app.Application.attachBaseContext])
-         * to capture discovery and initialization logs. Logging is **disabled by default**.
-         *
-         * @param enabled `true` to activate logging, `false` to silence it.
-         */
-        fun enableDebugLogging(enabled: Boolean) {
-            StartupExtensionLogger.enable(enabled)
-        }
-
         fun getInstance(context: Context): AppStartupInitializer {
             if (sInstance == null) {
                 synchronized(sLock) {

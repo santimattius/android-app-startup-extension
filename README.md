@@ -17,6 +17,9 @@ startup time without blocking the main thread.
 - **Metrics Flow:** Per-initializer timing and outcome data exposed as a hot `SharedFlow` — late collectors receive the full replay of all startup metrics.
 - **Cancellation Reporting:** `StartupMetric.wasCancelled` distinguishes structured cancellations from real failures.
 - **Transient Initializers:** Override `retainAfterStartup()` to `false` to release the initializer's result from the registry after startup, enabling GC of side-effect-only components.
+- **Configurable Sync Ordering:** Choose between `SyncOrderingStrategy.Lazy` (default DFS) or `Topological` (Kahn's algorithm with upfront cycle detection before any `create()` runs).
+- **Configurable Async Launch Strategy:** Choose between `AsyncInitializerStrategy.Concurrent` (default, one coroutine per initializer) or `Validated` (graph validation + root-only coroutine launch, reducing coroutine count for chained initializers).
+- **Unified Configuration DSL:** All runtime options consolidated into `AppStartupInitializer.configure { }`.
 - **StrictMode Integration:** Opt-in StrictMode check that detects blocking I/O inside sync initializers during development.
 - **Debug Logging:** Enable or disable library log output at runtime.
 - **Cross-type Dependencies:** Async initializers can now declare sync initializer dependencies.
@@ -266,35 +269,69 @@ class MigrationInitializer : StartupSyncInitializer<Unit> {
 > `create()` will be re-executed. Ensure `create()` is safe to call more than once, or avoid
 > requesting transient initializers after startup.
 
+### Configuration
+
+All runtime options are consolidated into a single `configure { }` DSL. Call it before
+`InitializationProvider` runs — the earliest safe point is `Application.attachBaseContext`.
+
+```kotlin
+class MyApplication : Application() {
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(base)
+        AppStartupInitializer.configure {
+            debugLoggingEnabled    = BuildConfig.DEBUG
+            strictModeCheckEnabled = BuildConfig.DEBUG
+            syncOrderingStrategy   = SyncOrderingStrategy.Topological
+            asyncInitializerStrategy = AsyncInitializerStrategy.Validated
+        }
+    }
+}
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `debugLoggingEnabled` | `Boolean` | `false` | Enables library log output (discovery + init messages) |
+| `strictModeCheckEnabled` | `Boolean` | `false` | Wraps each sync `create()` with a `StrictMode.ThreadPolicy` that surfaces blocking I/O violations in logcat |
+| `syncOrderingStrategy` | `SyncOrderingStrategy` | `Lazy` | Controls how sync initializers are ordered before execution |
+| `asyncInitializerStrategy` | `AsyncInitializerStrategy` | `Concurrent` | Controls how async initializers are validated and launched |
+
+#### `SyncOrderingStrategy`
+
+| Value | Behaviour |
+|---|---|
+| `Lazy` *(default)* | Existing DFS recursive resolution. Cycle detected mid-initialization — some `create()` calls may have already run when the exception is thrown. |
+| `Topological` | Kahn's algorithm validates the full dependency graph before any `create()` is called. Cycles are reported upfront with all participating node names. Eliminates redundant `doInitialize` calls for already-initialized components. |
+
+#### `AsyncInitializerStrategy`
+
+| Value | Behaviour |
+|---|---|
+| `Concurrent` *(default)* | One coroutine launched per discovered async initializer. Cycle detected lazily inside each coroutine's DFS chain. |
+| `Validated` | Builds the async-to-async dependency graph (from `dependencies()` only — `syncDependencies()` are already resolved by the time async initializers start) before launching any coroutine. Cycles detected upfront. Only **root** nodes — those no other async initializer depends on — receive an explicit coroutine; their dependencies are resolved recursively inside that coroutine, reducing total coroutine count for chained initializers. |
+
 ### StrictMode Integration
 
-Call `enableStrictModeCheck(true)` to wrap each `StartupSyncInitializer.create()` invocation with a
-`StrictMode.ThreadPolicy` that detects accidental disk I/O, network access, or any other blocking
-operation on the main thread. Violations appear as `StrictMode` entries in logcat.
+Wraps each `StartupSyncInitializer.create()` invocation with a `StrictMode.ThreadPolicy` that detects
+accidental disk I/O, network access, or any other blocking operation on the main thread. Violations
+appear as `StrictMode` entries in logcat.
 
 The original policy is always restored after each `create()` call, so this does not affect the app's
 own StrictMode configuration.
 
 ```kotlin
-class MyApplication : Application() {
-    override fun attachBaseContext(base: Context) {
-        super.attachBaseContext(base)
-        AppStartupInitializer.enableStrictModeCheck(BuildConfig.DEBUG)
-    }
+AppStartupInitializer.configure {
+    strictModeCheckEnabled = BuildConfig.DEBUG
 }
 ```
 
 ### Debug Logging
 
-Enable library log output at runtime. Call this before the `InitializationProvider` runs to capture
-discovery and initialization messages. Logging is **disabled by default**.
+Enable library log output to capture discovery and initialization messages.
+Logging is **disabled by default**.
 
 ```kotlin
-class MyApplication : Application() {
-    override fun attachBaseContext(base: Context) {
-        super.attachBaseContext(base)
-        AppStartupInitializer.enableDebugLogging(BuildConfig.DEBUG)
-    }
+AppStartupInitializer.configure {
+    debugLoggingEnabled = BuildConfig.DEBUG
 }
 ```
 
