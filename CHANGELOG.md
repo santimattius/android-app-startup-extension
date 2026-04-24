@@ -11,6 +11,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+#### Configuration DSL
+
+- `AppStartupConfig` — immutable configuration snapshot produced by `AppStartupConfig.Builder`.
+  Holds all runtime options in one place instead of scattered static calls.
+- `AppStartupInitializer.configure { }` — single DSL entry point that replaces all previous static
+  configuration methods. Call before `InitializationProvider` runs (e.g. in
+  `Application.attachBaseContext`):
+  ```kotlin
+  AppStartupInitializer.configure {
+      debugLoggingEnabled      = BuildConfig.DEBUG
+      strictModeCheckEnabled   = BuildConfig.DEBUG
+      syncOrderingStrategy     = SyncOrderingStrategy.Topological
+      asyncInitializerStrategy = AsyncInitializerStrategy.Validated
+  }
+  ```
+- `SyncOrderingStrategy` — sealed class controlling how sync initializers are ordered:
+  - `Lazy` *(default)*: existing DFS recursive resolution; cycle detected mid-initialization.
+  - `Topological`: Kahn's algorithm builds and validates the full dependency graph **before any
+    `create()` is called**. Cycles are reported upfront and the exception message names every
+    node participating in the cycle. Eliminates redundant `doInitialize` calls for components
+    already resolved as transitive dependencies.
+- `AsyncInitializerStrategy` — sealed class controlling how async initializers are launched:
+  - `Concurrent` *(default)*: existing behaviour — one coroutine per discovered initializer,
+    cycle detected lazily inside each coroutine's DFS chain.
+  - `Validated`: builds the async-to-async dependency graph (via `dependencies()` only —
+    `syncDependencies()` are excluded because all manifest-declared sync initializers have already
+    completed on the main thread by the time async initializers start) before launching any
+    coroutine. Cycles are detected upfront. Only **root** nodes — those no other async initializer
+    declares as a dependency — receive an explicit coroutine; their transitive dependencies are
+    resolved recursively inside that coroutine, reducing total coroutine launches for chained
+    initializer graphs (e.g. a chain of N initializers launches 1 coroutine instead of N).
+
 #### API
 
 - `awaitAllStartJobs(timeoutMs: Long)` — new overload that throws `TimeoutCancellationException` if
@@ -25,9 +57,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `AppStartupInitializer.metricsFlow: SharedFlow<StartupMetric>` — hot SharedFlow that emits after
   each initializer completes. All values are replayed (`replay = Int.MAX_VALUE`), so late collectors
   still receive the full startup sequence. Replaces the former `metricsListener` callback.
-- `AppStartupInitializer.enableDebugLogging(enabled: Boolean)` — static method to toggle library
-  log output at runtime. Disabled by default. Call before `InitializationProvider` runs (e.g. in
-  `Application.attachBaseContext`).
 - `StartupExtensionException` — typed exception wrapping any error that occurs during
   initialization, propagated from both sync and async initializers.
 
@@ -49,13 +78,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovered and run automatically during startup.
 - `isEagerlyAsyncInitialized(component)` — returns `true` if the given async initializer was
   discovered and launched automatically during startup.
-- `AppStartupInitializer.enableStrictModeCheck(enabled: Boolean)` — static method that wraps each
-  `StartupSyncInitializer.create()` with a `StrictMode.ThreadPolicy` (`detectAll` + `penaltyLog`)
-  to surface accidental blocking I/O on the main thread during development. The original policy is
-  always restored after each call. Disabled by default.
 
 ### Changed
 
+- `AppStartupInitializer.enableStrictModeCheck(Boolean)` and `enableDebugLogging(Boolean)` removed.
+  Both options are now set via `configure { strictModeCheckEnabled = …; debugLoggingEnabled = … }`.
 - `isAllStartedJobsDone()` now delegates to `areAllStartJobsDone()` inside the coroutines engine
   instead of accessing `startJobs` directly.
 - Async initialization now uses a `Mutex` per-instance (rather than companion object level) to
