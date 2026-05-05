@@ -50,16 +50,25 @@ interface StartupSyncInitializer<T : Any> {
     /**
      * Creates an instance of the desired type [T].
      *
-     * This function is designed to be called on the main (UI) thread.  It handles the
-     * necessary context and resource acquisition required for proper object instantiation.
+     * This function runs **synchronously on the main thread** inside [android.content.ContentProvider.onCreate].
+     * The Android system will trigger an ANR if the main thread is blocked for more than 5 seconds.
      *
-     * @param context The application context, typically obtained from an Activity or Application.
-     *                This context is used for accessing resources, services, and other system-level
-     *                information.
+     * **Do NOT perform any of the following inside `create()`:**
+     * - Disk reads or writes
+     * - Network requests
+     * - Database queries
+     * - Any blocking operation or long-running computation
+     *
+     * If your component requires heavy initialization, implement [StartupAsyncInitializer] instead and
+     * move the blocking work to [StartupAsyncInitializer.dispatcher] (e.g. `Dispatchers.IO`).
+     *
+     * To detect accidental violations at development time, call
+     * `AppStartupInitializer.enableStrictModeCheck(BuildConfig.DEBUG)` from
+     * [android.app.Application.attachBaseContext]. Any blocking I/O will appear as a
+     * `StrictMode` violation in logcat.
+     *
+     * @param context The application context.
      * @return An instance of type [T], fully initialized and ready for use.
-     * @throws IllegalStateException If the necessary resources or dependencies cannot be accessed
-     *                              through the provided context, or if any initialization process fails.
-     * @throws IllegalArgumentException if the provided context is invalid or null.
      */
     @MainThread
     fun create(context: Context): T
@@ -81,4 +90,39 @@ interface StartupSyncInitializer<T : Any> {
      *         [StartupSyncInitializer].
      */
     fun dependencies(): List<Class<out StartupSyncInitializer<*>>> = emptyList()
+
+    /**
+     * Whether the instance returned by [create] should be kept in the initializer registry
+     * after startup completes.
+     *
+     * ## Default behavior — `true` (retain)
+     *
+     * The result of [create] is stored in an internal `ConcurrentHashMap` keyed by the
+     * initializer class and held for the entire lifetime of the application. This is the
+     * correct behavior for components that other parts of the app retrieve post-startup
+     * via `AppStartupInitializer.getInstance(context).initializeComponent(...)`.
+     *
+     * ## Override to `false` (transient)
+     *
+     * Return `false` when [create] produces an object that is only needed **during the
+     * startup sequence itself** — for example, a configuration builder, a migration runner,
+     * or a bootstrapper that has no value once it has executed its side effects. The library
+     * will release the reference from its registry as soon as initialization finishes,
+     * allowing the GC to collect the object.
+     *
+     * ```kotlin
+     * class MigrationInitializer : StartupSyncInitializer<Unit> {
+     *     override fun create(context: Context) {
+     *         DatabaseMigrationRunner(context).runPendingMigrations()
+     *     }
+     *     // Unit result has no value post-startup; release it immediately.
+     *     override fun retainAfterStartup(): Boolean = false
+     * }
+     * ```
+     *
+     * > **Note:** A transient initializer whose result is requested again after startup
+     * > (via `initializeComponent`) will re-execute [create]. Make sure [create] is safe
+     * > to call more than once, or avoid requesting transient initializers post-startup.
+     */
+    fun retainAfterStartup(): Boolean = true
 }

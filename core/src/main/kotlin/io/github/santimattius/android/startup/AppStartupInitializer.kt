@@ -6,15 +6,19 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.PackageManager.GET_META_DATA
 import android.os.Bundle
+import android.os.StrictMode
 import android.os.Trace
 import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
 import kotlin.concurrent.Volatile
 
 /**
@@ -45,13 +49,42 @@ class AppStartupInitializer internal constructor(
     coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
 
-    internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher)
+    internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher ?: Dispatchers.Default)
+
+    private val metricsBus = StartupMetricsBus()
+
+    /**
+     * Hot [SharedFlow] that emits a [StartupMetric] after each initializer completes,
+     * whether it succeeds or throws.
+     *
+     * All emitted values are replayed to late collectors: a collector joining after startup
+     * finishes will still receive the full set of metrics from the startup sequence.
+     *
+     * **Thread of emission:** metrics are emitted from the initializer's own thread —
+     * the Main Thread for sync initializers, and the initializer's `dispatcher()` for async ones.
+     * [SharedFlow] handles the cross-thread delivery internally: your `collect` lambda always
+     * runs on the dispatcher of the coroutine that launched the collection, so no manual
+     * thread-switching is required on the consumer side.
+     *
+     * Collect from a lifecycle-aware scope to avoid retaining UI references in the singleton:
+     * ```kotlin
+     * lifecycleScope.launch {
+     *     AppStartupInitializer.getInstance(context).metricsFlow.collect { metric ->
+     *         updateDashboard(metric) // runs on Main — safe to touch UI here
+     *     }
+     * }
+     * ```
+     */
+    val metricsFlow: SharedFlow<StartupMetric> get() = metricsBus.metricsFlow
 
     private val initialized = ConcurrentHashMap<Class<*>, Any>()
-    private val syncDiscovered: MutableSet<Class<out StartupSyncInitializer<*>>> = HashSet()
-    private val asyncDiscovered: MutableSet<Class<out StartupAsyncInitializer<*>>> = HashSet()
+    private val syncDiscovered: MutableSet<Class<out StartupSyncInitializer<*>>> = CopyOnWriteArraySet()
+    private val asyncDiscovered: MutableSet<Class<out StartupAsyncInitializer<*>>> = CopyOnWriteArraySet()
 
     private val applicationContext: Context = context.applicationContext
+
+    private val syncLock = Any()
+    private val mutex = Mutex()
 
     /**
      * Initializes a component of type [T] using its corresponding [StartupSyncInitializer].
@@ -126,7 +159,7 @@ class AppStartupInitializer internal constructor(
      */
     fun <T> doInitialize(component: Class<out StartupSyncInitializer<*>>): T {
         var result: Any?
-        synchronized(sLock) {
+        synchronized(syncLock) {
             result = initialized[component]
             if (result == null) {
                 result = doInitialize<T>(component, HashSet())
@@ -154,6 +187,8 @@ class AppStartupInitializer internal constructor(
      * @see Mutex
      */
     suspend fun <T> doInitialize(component: Class<out StartupAsyncInitializer<*>>): T {
+        // Fast path: already initialized, no lock needed (ConcurrentHashMap read is safe)
+        initialized[component]?.let { return it as T }
         return mutex.withLock {
             initialized[component] ?: doAsyncInitialize(component, HashSet())
         } as T
@@ -182,8 +217,13 @@ class AppStartupInitializer internal constructor(
         try {
             Trace.beginSection(SECTION_NAME)
             val provider = ComponentName(applicationContext, initializationProvider)
-            val providerInfo = applicationContext.packageManager
-                .getProviderInfo(provider, GET_META_DATA)
+            val providerInfo = Trace.beginSection(TRACE_PROVIDER_INFO).let {
+                try {
+                    applicationContext.packageManager.getProviderInfo(provider, GET_META_DATA)
+                } finally {
+                    Trace.endSection()
+                }
+            }
             val metadata = providerInfo.metaData
             syncDiscoverAndInitialize(metadata)
             asyncDiscoverAndInitialize(metadata)
@@ -222,32 +262,66 @@ class AppStartupInitializer internal constructor(
         component: Class<out StartupSyncInitializer<*>>,
         initializing: MutableSet<Class<*>>
     ): T {
-        Trace.beginSection(component.simpleName)
+        Trace.beginSection("$TRACE_PREFIX${component.simpleName}")
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
-            return initialized.getOrPut(component) {
+            var shouldRetain = true
+            val result = initialized.getOrPut(component) {
+                requireConcreteClass(component)
                 initializing.add(component)
                 try {
                     val initializer =
                         component.getDeclaredConstructor()
                             .newInstance() as StartupSyncInitializer<*>
 
+                    shouldRetain = initializer.retainAfterStartup()
+
                     initializer.dependencies()
                         .filterNot { initialized.containsKey(it) }
                         .forEach { doInitialize<Any>(it, initializing) }
 
-                    if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Initializing ${component.name}")
-                    val result = initializer.create(applicationContext)
-                    if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Initialized ${component.name}")
-
-                    result
+                    StartupExtensionLogger.info("Initializing ${component.name}")
+                    val startNs = System.nanoTime()
+                    var success = false
+                    // Install a StrictMode policy that detects accidental I/O or disk
+                    // access inside create(). Only active when the caller opts in via
+                    // enableStrictModeCheck(true). The original policy is restored after
+                    // every create() call regardless of outcome.
+                    val savedPolicy = if (config.strictModeCheckEnabled) {
+                        StrictMode.getThreadPolicy().also {
+                            StrictMode.setThreadPolicy(
+                                StrictMode.ThreadPolicy.Builder()
+                                    .detectAll()
+                                    .penaltyLog()
+                                    .build()
+                            )
+                        }
+                    } else null
+                    try {
+                        val result = initializer.create(applicationContext)
+                        success = true
+                        StartupExtensionLogger.info("Initialized ${component.name}")
+                        result
+                    } finally {
+                        savedPolicy?.let { StrictMode.setThreadPolicy(it) }
+                        metricsBus.publish(
+                            StartupMetric(
+                                initializerName = component.simpleName,
+                                durationMs = (System.nanoTime() - startNs) / 1_000_000L,
+                                isAsync = false,
+                                success = success,
+                            )
+                        )
+                    }
                 } catch (throwable: Throwable) {
                     throw StartupExtensionException(throwable)
                 } finally {
                     initializing.remove(component)
                 }
             } as T
+            if (!shouldRetain) initialized.remove(component)
+            return result
         } finally {
             Trace.endSection()
         }
@@ -272,26 +346,60 @@ class AppStartupInitializer internal constructor(
         component: Class<out StartupAsyncInitializer<*>>,
         initializing: MutableSet<Class<*>>
     ): T {
-        Trace.beginSection(component.simpleName)
+        Trace.beginSection("$TRACE_PREFIX${component.simpleName}")
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
-            return initialized.getOrPut(component) {
+            var shouldRetain = true
+            val result = initialized.getOrPut(component) {
+                requireConcreteClass(component)
                 initializing.add(component)
                 try {
                     val initializer = component.getDeclaredConstructor()
                         .newInstance()
                         .also { it as StartupAsyncInitializer<*> }
 
-                    initializer.dependencies()
+                    val asyncInitializer = (initializer as StartupAsyncInitializer<*>)
+                    shouldRetain = asyncInitializer.retainAfterStartup()
+
+                    asyncInitializer.dependencies()
                         .filterNot(initialized::containsKey)
                         .forEach { doAsyncInitialize<Any>(it, initializing) }
 
-                    if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Initializing ${component.name}")
-                    val result = initializer.create(applicationContext)
-                    if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Initialized ${component.name}")
+                    // Resolve cross-type dependencies: sync initializers that must complete
+                    // before this async initializer's create() is invoked.
+                    asyncInitializer.syncDependencies()
+                        .filterNot(initialized::containsKey)
+                        .forEach { doInitialize<Any>(it) }
 
-                    result
+                    StartupExtensionLogger.info("Initializing ${component.name}")
+                    val startNs = System.nanoTime()
+                    var success = false
+                    var wasCancelled = false
+                    val initializerDispatcher = asyncInitializer.dispatcher()
+                    try {
+                        val result = withContext(initializerDispatcher) {
+                            asyncInitializer.create(applicationContext)
+                        }
+                        success = true
+                        StartupExtensionLogger.info("Initialized ${component.name}")
+                        result
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        wasCancelled = true
+                        throw e
+                    } finally {
+                        metricsBus.publish(
+                            StartupMetric(
+                                initializerName = component.simpleName,
+                                durationMs = (System.nanoTime() - startNs) / 1_000_000L,
+                                isAsync = true,
+                                success = success,
+                                wasCancelled = wasCancelled,
+                            )
+                        )
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (throwable: Throwable) {
                     StartupExtensionLogger.error(
                         "Error initializing ${component.name}: ${throwable.message}",
@@ -302,6 +410,8 @@ class AppStartupInitializer internal constructor(
                     initializing.remove(component)
                 }
             } as T
+            if (!shouldRetain) initialized.remove(component)
+            return result
         } finally {
             Trace.endSection()
         }
@@ -331,23 +441,81 @@ class AppStartupInitializer internal constructor(
      * @see doInitialize
      */
     private fun syncDiscoverAndInitialize(metadata: Bundle) {
-        val initializing = mutableSetOf<Class<*>>()
-
         syncDiscovered.addAll(
             metadata.keySet()
                 .filter { key -> metadata.getString(key) == KEY_SYNC_INITIALIZER }
                 .mapNotNull { key ->
                     try {
-                        Class.forName(key)
+                        Class.forName(key, false, applicationContext.classLoader)
                             .takeIf { StartupSyncInitializer::class.java.isAssignableFrom(it) }
                             ?.let { it as Class<out StartupSyncInitializer<*>> }
-                            ?.also { if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Discovered $key") }
+                            ?.also { StartupExtensionLogger.info("Discovered $key") }
                     } catch (e: ClassNotFoundException) {
                         throw StartupExtensionException(e)
                     }
                 }
         )
-        syncDiscovered.forEach { doInitialize(it, initializing) }
+
+        val ordered = when (config.syncOrderingStrategy) {
+            is SyncOrderingStrategy.Lazy -> syncDiscovered.toList()
+            is SyncOrderingStrategy.Topological -> topologicalSort(syncDiscovered)
+        }
+
+        val initializing = mutableSetOf<Class<*>>()
+        ordered.forEach { doInitialize(it, initializing) }
+    }
+
+    /**
+     * Sorts [discovered] sync initializers using Kahn's algorithm so that every dependency
+     * appears before the nodes that depend on it.
+     *
+     * Cycle detection is a by-product of Kahn's: if not all nodes are processed the remaining
+     * ones must form a cycle. The exception is thrown before any [StartupSyncInitializer.create]
+     * is called, making the failure state clean and easy to diagnose.
+     *
+     * @throws StartupExtensionException if a cycle is found, naming all participating nodes.
+     */
+    internal fun topologicalSort(
+        discovered: Set<Class<out StartupSyncInitializer<*>>>,
+    ): List<Class<out StartupSyncInitializer<*>>> {
+        val inDegree = mutableMapOf<Class<out StartupSyncInitializer<*>>, Int>()
+        val adjacency = mutableMapOf<Class<out StartupSyncInitializer<*>>, MutableList<Class<out StartupSyncInitializer<*>>>>()
+
+        discovered.forEach { cls ->
+            inDegree.getOrPut(cls) { 0 }
+            adjacency.getOrPut(cls) { mutableListOf() }
+
+            cls.getDeclaredConstructor().newInstance()
+                .let { it as StartupSyncInitializer<*> }
+                .dependencies()
+                .filter { it in discovered }
+                .forEach { dep ->
+                    adjacency.getOrPut(dep) { mutableListOf() }.add(cls)
+                    inDegree[cls] = (inDegree[cls] ?: 0) + 1
+                    inDegree.getOrPut(dep) { 0 }
+                }
+        }
+
+        val queue = ArrayDeque<Class<out StartupSyncInitializer<*>>>()
+        inDegree.filterValues { it == 0 }.keys.forEach { queue.add(it) }
+
+        val sorted = mutableListOf<Class<out StartupSyncInitializer<*>>>()
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            sorted.add(current)
+            adjacency[current]?.forEach { neighbor ->
+                val newDegree = (inDegree[neighbor] ?: 1) - 1
+                inDegree[neighbor] = newDegree
+                if (newDegree == 0) queue.add(neighbor)
+            }
+        }
+
+        if (sorted.size != discovered.size) {
+            val cycleNodes = (discovered - sorted.toSet()).joinToString(", ") { it.simpleName }
+            throw StartupExtensionException("Cycle detected in sync initializers: [$cycleNodes]")
+        }
+
+        return sorted
     }
 
     /**
@@ -369,7 +537,7 @@ class AppStartupInitializer internal constructor(
      * 2. **Class Loading:** For each filtered key, attempts to load the corresponding class using [Class.forName].
      * 3. **Type Checking:** Verifies if the loaded class implements the [StartupAsyncInitializer] interface.
      * 4. **Casting:** Safely casts the loaded class to `Class<out StartupAsyncInitializer<*>>` if it passes the type check.
-     * 5. **Discovery Logging:** Logs a debug message if [StartupExtensionLogger.DEBUG] is enabled, indicating which class was discovered.
+     * 5. **Discovery Logging:** Logs a debug message if [StartupExtensionLogger.isDebugEnabled] is enabled, indicating which class was discovered.
      * 6. **Initialization Launch:** Launches a coroutine for each discovered initializer using [coroutinesEngine.launchStartJob].
      *    The coroutine executes the [doAsyncInitialize] function to perform the asynchronous initialization.
      * 7. **Concurrent Initialization handling**: uses the `initializing` set to avoid double initialize.
@@ -383,39 +551,148 @@ class AppStartupInitializer internal constructor(
      * - Logs debug messages to `StartupExtensionLogger` if debug mode is enabled.
      */
     private fun asyncDiscoverAndInitialize(metadata: Bundle) {
-        val initializing = mutableSetOf<Class<*>>()
-
         asyncDiscovered.addAll(
             metadata.keySet()
                 .filter { key -> metadata.getString(key) == KEY_ASYNC_INITIALIZER }
                 .mapNotNull { key ->
                     try {
-                        Class.forName(key)
+                        Class.forName(key, false, applicationContext.classLoader)
                             .takeIf { StartupAsyncInitializer::class.java.isAssignableFrom(it) }
                             ?.let { it as Class<out StartupAsyncInitializer<*>> }
-                            ?.also { if (StartupExtensionLogger.DEBUG) StartupExtensionLogger.info("Discovered $key") }
+                            ?.also { StartupExtensionLogger.info("Discovered $key") }
                     } catch (e: ClassNotFoundException) {
                         throw StartupExtensionException(e)
                     }
                 }
         )
-        asyncDiscovered.forEach { initializer ->
-            coroutinesEngine.launchStartJob { doAsyncInitialize<Any>(initializer, initializing) }
+        val toLaunch = when (config.asyncInitializerStrategy) {
+            is AsyncInitializerStrategy.Concurrent -> asyncDiscovered
+            is AsyncInitializerStrategy.Validated -> asyncValidateAndGetRoots(asyncDiscovered)
+        }
+
+        toLaunch.forEach { initializer ->
+            // Each job gets its own initializing set: cycle detection is per-chain,
+            // and sharing a mutable set across concurrent coroutines is a data race.
+            coroutinesEngine.launchStartJob { doAsyncInitialize<Any>(initializer, HashSet()) }
         }
     }
 
+    /**
+     * Validates the async-to-async dependency graph (built from [StartupAsyncInitializer.dependencies]
+     * only — [StartupAsyncInitializer.syncDependencies] are excluded because all sync initializers
+     * discovered in the manifest have already completed before this is called) and returns the
+     * **root** nodes: async initializers that no other async initializer depends on.
+     *
+     * Cycle detection uses Kahn's algorithm as a by-product: if not all nodes are processed,
+     * the remaining ones form a cycle. The exception is thrown before any coroutine is launched
+     * or any [StartupAsyncInitializer.create] is called.
+     *
+     * Launching only the roots is sufficient — each root coroutine resolves its transitive
+     * async dependencies recursively via [doAsyncInitialize], eliminating redundant coroutine launches.
+     *
+     * @throws StartupExtensionException if a cycle is found, naming all participating nodes.
+     */
+    internal fun asyncValidateAndGetRoots(
+        discovered: Set<Class<out StartupAsyncInitializer<*>>>,
+    ): Set<Class<out StartupAsyncInitializer<*>>> {
+        val inDegree = mutableMapOf<Class<out StartupAsyncInitializer<*>>, Int>()
+        val adjacency = mutableMapOf<Class<out StartupAsyncInitializer<*>>, MutableList<Class<out StartupAsyncInitializer<*>>>>()
+        val allDeclaredDependencies = mutableSetOf<Class<out StartupAsyncInitializer<*>>>()
+
+        discovered.forEach { cls ->
+            inDegree.getOrPut(cls) { 0 }
+            adjacency.getOrPut(cls) { mutableListOf() }
+
+            cls.getDeclaredConstructor().newInstance()
+                .let { it as StartupAsyncInitializer<*> }
+                .dependencies()
+                .filter { it in discovered }
+                .forEach { dep ->
+                    allDeclaredDependencies.add(dep)
+                    adjacency.getOrPut(dep) { mutableListOf() }.add(cls)
+                    inDegree[cls] = (inDegree[cls] ?: 0) + 1
+                    inDegree.getOrPut(dep) { 0 }
+                }
+        }
+
+        val queue = ArrayDeque<Class<out StartupAsyncInitializer<*>>>()
+        inDegree.filterValues { it == 0 }.keys.forEach { queue.add(it) }
+
+        val processed = mutableListOf<Class<out StartupAsyncInitializer<*>>>()
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            processed.add(current)
+            adjacency[current]?.forEach { neighbor ->
+                val newDegree = (inDegree[neighbor] ?: 1) - 1
+                inDegree[neighbor] = newDegree
+                if (newDegree == 0) queue.add(neighbor)
+            }
+        }
+
+        if (processed.size != discovered.size) {
+            val cycleNodes = (discovered - processed.toSet()).joinToString(", ") { it.simpleName }
+            throw StartupExtensionException("Cycle detected in async initializers: [$cycleNodes]")
+        }
+
+        return discovered - allDeclaredDependencies
+    }
+
+
+    /**
+     * Validates that [component] is a concrete, instantiable class before attempting reflection.
+     *
+     * Throwing early with a clear message avoids the cryptic [InstantiationException] that the
+     * JVM would otherwise produce when [Class.newInstance] is called on an abstract class or interface.
+     *
+     * @throws StartupExtensionException if [component] is abstract or an interface.
+     */
+    private fun requireConcreteClass(component: Class<*>) {
+        if (component.isInterface || java.lang.reflect.Modifier.isAbstract(component.modifiers)) {
+            throw StartupExtensionException(
+                "Cannot initialize ${component.name}: expected a concrete class " +
+                    "but got an abstract class or interface."
+            )
+        }
+    }
 
     companion object {
         private const val KEY_SYNC_INITIALIZER = "sync-initializer"
         private const val KEY_ASYNC_INITIALIZER = "async-initializer"
         private const val SECTION_NAME = "StartupExtension"
+        private const val TRACE_PREFIX = "Startup::"
+        private const val TRACE_PROVIDER_INFO = "Startup::getProviderInfo"
+
+        @Volatile
+        private var config: AppStartupConfig = AppStartupConfig.default()
+
+        /**
+         * Applies a configuration block to the library.
+         *
+         * Call before [InitializationProvider] runs — the earliest safe point is
+         * [android.app.Application.attachBaseContext]:
+         *
+         * ```kotlin
+         * override fun attachBaseContext(base: Context) {
+         *     super.attachBaseContext(base)
+         *     AppStartupInitializer.configure {
+         *         debugLoggingEnabled    = BuildConfig.DEBUG
+         *         strictModeCheckEnabled = BuildConfig.DEBUG
+         *         syncOrderingStrategy   = SyncOrderingStrategy.Topological
+         *     }
+         * }
+         * ```
+         */
+        fun configure(block: AppStartupConfig.Builder.() -> Unit) {
+            val newConfig = AppStartupConfig.Builder().apply(block).build()
+            config = newConfig
+            StartupExtensionLogger.enable(newConfig.debugLoggingEnabled)
+        }
 
         @SuppressLint("StaticFieldLeak")
         @Volatile
         private var sInstance: AppStartupInitializer? = null
 
         private val sLock = Any()
-        private val mutex = Mutex()
 
         /**
          * Provides a singleton instance of [AppStartupInitializer].

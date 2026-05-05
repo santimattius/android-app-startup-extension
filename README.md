@@ -12,6 +12,19 @@ startup time without blocking the main thread.
 - **Synchronous Initialization:** Allows components to be initialized synchronously.
 - **Asynchronous Initialization:** Supports asynchronous component initialization to avoid blocking
   the main thread.
+- **Startup State Lifecycle:** Observe the startup lifecycle (`IDLE → IN_PROGRESS → COMPLETED / ERROR`) via a `StateFlow`.
+- **Timeout Support:** Await all startup jobs with a configurable timeout.
+- **Metrics Flow:** Per-initializer timing and outcome data exposed as a hot `SharedFlow` — late collectors receive the full replay of all startup metrics.
+- **Cancellation Reporting:** `StartupMetric.wasCancelled` distinguishes structured cancellations from real failures.
+- **Transient Initializers:** Override `retainAfterStartup()` to `false` to release the initializer's result from the registry after startup, enabling GC of side-effect-only components.
+- **Configurable Sync Ordering:** Choose between `SyncOrderingStrategy.Lazy` (default DFS) or `Topological` (Kahn's algorithm with upfront cycle detection before any `create()` runs).
+- **Configurable Async Launch Strategy:** Choose between `AsyncInitializerStrategy.Concurrent` (default, one coroutine per initializer) or `Validated` (graph validation + root-only coroutine launch, reducing coroutine count for chained initializers).
+- **Unified Configuration DSL:** All runtime options consolidated into `AppStartupInitializer.configure { }`.
+- **StrictMode Integration:** Opt-in StrictMode check that detects blocking I/O inside sync initializers during development.
+- **Debug Logging:** Enable or disable library log output at runtime.
+- **Cross-type Dependencies:** Async initializers can now declare sync initializer dependencies.
+- **Per-initializer Dispatcher:** Each async initializer can specify its own `CoroutineDispatcher`.
+- **R8/ProGuard Rules:** Consumer keep rules are bundled — no manual configuration required.
 
 ## Installation
 
@@ -65,6 +78,34 @@ class AsyncTestInitializer : StartupAsyncInitializer<Unit> {
 }
 ```
 
+#### Per-initializer Dispatcher
+
+Override `dispatcher()` to pin the initializer's `create()` to a specific thread pool. Defaults to `Dispatchers.Default`.
+
+```kotlin
+class DatabaseInitializer : StartupAsyncInitializer<Unit> {
+    override fun dispatcher() = Dispatchers.IO
+
+    override suspend fun create(context: Context) {
+        // runs on Dispatchers.IO
+    }
+}
+```
+
+#### Cross-type Dependencies
+
+An async initializer can declare that certain sync initializers must complete before its `create()` is called by overriding `syncDependencies()`.
+
+```kotlin
+class AnalyticsInitializer : StartupAsyncInitializer<Unit> {
+    override fun syncDependencies() = listOf(ConfigInitializer::class.java)
+
+    override suspend fun create(context: Context) {
+        // ConfigInitializer.create() is guaranteed to have finished
+    }
+}
+```
+
 ### Registering in `AndroidManifest.xml`
 
 ```xml
@@ -100,9 +141,7 @@ coroutineScope.launch {
 
 ### awaitAllStartJobs()
 
-This function suspends execution until all asynchronous initialization tasks started by
-AppStartupInitializer are completed. It ensures that any background
-startup operations, such as data preloading or library initialization, finish before proceeding.
+Suspends until all asynchronous initialization tasks started by `AppStartupInitializer` are completed.
 
 ```kotlin
 val appStartupInitializer = AppStartupInitializer.getInstance(appContext)
@@ -110,7 +149,17 @@ val appStartupInitializer = AppStartupInitializer.getInstance(appContext)
 coroutineScope.launch {
     appStartupInitializer.awaitAllStartJobs()
 }
+```
 
+### awaitAllStartJobs(timeoutMs)
+
+Same as above but throws `TimeoutCancellationException` if the jobs do not complete within the given
+number of milliseconds. The underlying jobs continue running in the background — only the wait is cancelled.
+
+```kotlin
+coroutineScope.launch {
+    appStartupInitializer.awaitAllStartJobs(timeoutMs = 5_000)
+}
 ```
 
 ### onAppStartupLaunched
@@ -127,13 +176,162 @@ coroutineScope.launch {
 ```
 
 ### isAllStartedJobsDone
-Checks if all initialization jobs managed by AppStartupInitializer are completed. It returns true if
-no jobs are currently active, otherwise false.
+
+Checks if all initialization jobs managed by `AppStartupInitializer` are completed. Returns `true` if
+no jobs are currently active, `false` otherwise.
 
 ```kotlin
-
 if (appStartupInitializer.isAllStartedJobsDone()) {
     Log.d("AppStartup", "All startup jobs have finished")
+}
+```
+
+### startupState
+
+A hot `StateFlow<StartupState>` that reflects the current startup lifecycle. Collect it to react to
+state changes without polling.
+
+```
+IDLE → IN_PROGRESS → COMPLETED
+                   ↘ ERROR       (on first job failure; sibling jobs continue)
+```
+
+```kotlin
+coroutineScope.launch {
+    appStartupInitializer.startupState.collect { state ->
+        when (state) {
+            StartupState.COMPLETED -> Log.d("AppStartup", "Startup finished")
+            StartupState.ERROR     -> Log.e("AppStartup", "Startup failed")
+            else -> Unit
+        }
+    }
+}
+```
+
+### Metrics
+
+`metricsFlow` is a hot `SharedFlow<StartupMetric>` that emits after each initializer completes
+(success or failure). All values are **replayed** — a collector that joins after startup finishes
+will still receive the full set of metrics from the startup sequence.
+
+```kotlin
+lifecycleScope.launch {
+    AppStartupInitializer.getInstance(context).metricsFlow.collect { metric ->
+        Log.d(
+            "Metrics",
+            "${metric.initializerName} took ${metric.durationMs}ms " +
+            "(async=${metric.isAsync}, success=${metric.success}, " +
+            "cancelled=${metric.wasCancelled})"
+        )
+    }
+}
+```
+
+`StartupMetric` fields:
+
+| Field | Description |
+|---|---|
+| `initializerName` | `Class.simpleName` of the initializer |
+| `durationMs` | Monotonic milliseconds elapsed during `create()` |
+| `isAsync` | `true` for async initializers, `false` for sync |
+| `success` | `true` if `create()` completed without throwing |
+| `wasCancelled` | `true` if interrupted by structured cancellation (not a real failure) |
+
+> **Note:** Collect from a lifecycle-aware scope (e.g. `lifecycleScope`) to avoid retaining
+> UI references in the singleton.
+
+### Transient Initializers
+
+By default, the result of `create()` is held in an internal registry for the lifetime of the app.
+Override `retainAfterStartup()` to `false` when an initializer only exists for its side effects and
+its result has no value after startup. The library will drop the reference immediately after `create()`
+finishes, allowing the GC to collect the object.
+
+```kotlin
+class CacheWarmupInitializer : StartupAsyncInitializer<Unit> {
+    override suspend fun create(context: Context) {
+        ImageCache.warmup(context)
+    }
+    override fun retainAfterStartup(): Boolean = false
+}
+```
+
+```kotlin
+class MigrationInitializer : StartupSyncInitializer<Unit> {
+    override fun create(context: Context) {
+        DatabaseMigrationRunner(context).runPendingMigrations()
+    }
+    override fun retainAfterStartup(): Boolean = false
+}
+```
+
+> **Note:** If a transient initializer is requested again post-startup via `initializeComponent`,
+> `create()` will be re-executed. Ensure `create()` is safe to call more than once, or avoid
+> requesting transient initializers after startup.
+
+### Configuration
+
+All runtime options are consolidated into a single `configure { }` DSL. Call it before
+`InitializationProvider` runs — the earliest safe point is `Application.attachBaseContext`.
+
+```kotlin
+class MyApplication : Application() {
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(base)
+        AppStartupInitializer.configure {
+            debugLoggingEnabled    = BuildConfig.DEBUG
+            strictModeCheckEnabled = BuildConfig.DEBUG
+            syncOrderingStrategy   = SyncOrderingStrategy.Topological
+            asyncInitializerStrategy = AsyncInitializerStrategy.Validated
+        }
+    }
+}
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `debugLoggingEnabled` | `Boolean` | `false` | Enables library log output (discovery + init messages) |
+| `strictModeCheckEnabled` | `Boolean` | `false` | Wraps each sync `create()` with a `StrictMode.ThreadPolicy` that surfaces blocking I/O violations in logcat |
+| `syncOrderingStrategy` | `SyncOrderingStrategy` | `Lazy` | Controls how sync initializers are ordered before execution |
+| `asyncInitializerStrategy` | `AsyncInitializerStrategy` | `Concurrent` | Controls how async initializers are validated and launched |
+
+#### `SyncOrderingStrategy`
+
+| Value | Behaviour |
+|---|---|
+| `Lazy` *(default)* | Existing DFS recursive resolution. Cycle detected mid-initialization — some `create()` calls may have already run when the exception is thrown. |
+| `Topological` | Kahn's algorithm validates the full dependency graph before any `create()` is called. Cycles are reported upfront with all participating node names. Eliminates redundant `doInitialize` calls for already-initialized components. |
+
+#### `AsyncInitializerStrategy`
+
+| Value | Behaviour |
+|---|---|
+| `Concurrent` *(default)* | One coroutine launched per discovered async initializer. Cycle detected lazily inside each coroutine's DFS chain. |
+| `Validated` | Builds the async-to-async dependency graph (from `dependencies()` only — `syncDependencies()` are already resolved by the time async initializers start) before launching any coroutine. Cycles detected upfront. Only **root** nodes — those no other async initializer depends on — receive an explicit coroutine; their dependencies are resolved recursively inside that coroutine, reducing total coroutine count for chained initializers. |
+
+### StrictMode Integration
+
+Wraps each `StartupSyncInitializer.create()` invocation with a `StrictMode.ThreadPolicy` that detects
+accidental disk I/O, network access, or any other blocking operation on the main thread. Violations
+appear as `StrictMode` entries in logcat.
+
+The original policy is always restored after each `create()` call, so this does not affect the app's
+own StrictMode configuration.
+
+```kotlin
+AppStartupInitializer.configure {
+    strictModeCheckEnabled = BuildConfig.DEBUG
+}
+```
+
+### Debug Logging
+
+Enable library log output to capture discovery and initialization messages.
+Logging is **disabled by default**.
+
+```kotlin
+AppStartupInitializer.configure {
+    debugLoggingEnabled = BuildConfig.DEBUG
 }
 ```
 

@@ -1,7 +1,9 @@
 package io.github.santimattius.android.startup.engine
 
 import android.util.Log
-import java.util.concurrent.CopyOnWriteArrayList
+import io.github.santimattius.android.startup.StartupState
+import java.util.Collections
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -9,6 +11,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.CoroutineContext
 
 /**
@@ -34,7 +40,9 @@ import kotlin.coroutines.CoroutineContext
  * @property dispatcher The `CoroutineDispatcher` used for launching coroutines. Defaults to `Dispatchers.Default` if not provided.
  * @property supervisorJob A `SupervisorJob` that manages the lifecycle of all launched jobs.
  * @property coroutineContext The combined `CoroutineContext` composed of the `supervisorJob` and `dispatcher`.
- * @property _startJobs An `ArrayList` holding `Deferred` instances representing the launched startup jobs.
+ * @property _startJobs A synchronized [ArrayList] holding [Deferred] instances for launched startup jobs.
+ *   Writes happen only during discovery (single-threaded) and reads only during await — no concurrent
+ *   access in practice, but synchronized for correctness guarantees.
  */
 internal class AppStartupCoroutinesEngine(
     coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
@@ -46,11 +54,17 @@ internal class AppStartupCoroutinesEngine(
     override val coroutineContext: CoroutineContext
         get() = supervisorJob + dispatcher
 
-    private val _startJobs = CopyOnWriteArrayList<Deferred<*>>()
+    private val _startJobs: MutableList<Deferred<*>> = Collections.synchronizedList(ArrayList())
     val startJobs: List<Deferred<*>>
         get() = _startJobs
 
+    private val _startupState = MutableStateFlow(StartupState.IDLE)
+
+    /** Hot [StateFlow] that reflects the current startup lifecycle state. */
+    val startupState: StateFlow<StartupState> = _startupState.asStateFlow()
+
     fun <T> launchStartJob(block: suspend CoroutineScope.() -> T) {
+        _startupState.value = StartupState.IN_PROGRESS
         _startJobs.add(async { block() })
     }
 
@@ -58,10 +72,45 @@ internal class AppStartupCoroutinesEngine(
         Log.d(EXTENSION_NAME, "$TAG - await All Start Jobs ...")
         try {
             _startJobs.awaitAll()
+            _startupState.value = StartupState.COMPLETED
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            _startupState.value = StartupState.ERROR
+            throw e
         } finally {
             _startJobs.clear()
         }
     }
+
+    /**
+     * Awaits completion of all start jobs within [timeoutMs] milliseconds.
+     *
+     * If the jobs do not complete within the given timeout, [kotlinx.coroutines.TimeoutCancellationException]
+     * is thrown. Any jobs still running at that point are explicitly cancelled to avoid zombie
+     * coroutines consuming CPU and I/O in the background with no reference to clean them up.
+     *
+     * @throws kotlinx.coroutines.TimeoutCancellationException if the timeout elapses before all jobs finish.
+     */
+    suspend fun awaitAllStartJobs(timeoutMs: Long) {
+        Log.d(EXTENSION_NAME, "$TAG - await All Start Jobs with timeout ${timeoutMs}ms ...")
+        try {
+            withTimeout(timeoutMs) {
+                _startJobs.awaitAll()
+            }
+            _startupState.value = StartupState.COMPLETED
+        } catch (e: CancellationException) {
+            _startJobs.filter { it.isActive }.forEach { it.cancel() }
+            throw e
+        } catch (e: Throwable) {
+            _startupState.value = StartupState.ERROR
+            throw e
+        } finally {
+            _startJobs.clear()
+        }
+    }
+
+    internal fun areAllStartJobsDone(): Boolean = startJobs.none { it.isActive }
 
     fun cancel() {
         supervisorJob.cancel()

@@ -1,5 +1,7 @@
 package io.github.santimattius.android.startup
 
+import kotlinx.coroutines.flow.StateFlow
+
 /**
  * Awaits the completion of all start jobs initiated by the [AppStartupInitializer].
  *
@@ -26,6 +28,18 @@ package io.github.santimattius.android.startup
  */
 suspend fun AppStartupInitializer.awaitAllStartJobs() {
     coroutinesEngine.awaitAllStartJobs()
+}
+
+/**
+ * Awaits completion of all start jobs within [timeoutMs] milliseconds.
+ *
+ * This is a new overload that does not change the behavior of [awaitAllStartJobs].
+ *
+ * @param timeoutMs Maximum time in milliseconds to wait for all jobs to complete.
+ * @throws kotlinx.coroutines.TimeoutCancellationException if the timeout elapses before all jobs finish.
+ */
+suspend fun AppStartupInitializer.awaitAllStartJobs(timeoutMs: Long) {
+    coroutinesEngine.awaitAllStartJobs(timeoutMs)
 }
 
 /**
@@ -63,5 +77,17 @@ suspend fun AppStartupInitializer.onAppStartupLaunched(block: suspend (AppStartu
  * @see awaitAllStartJobs
  */
 fun AppStartupInitializer.isAllStartedJobsDone(): Boolean {
-    return coroutinesEngine.startJobs.none { it.isActive }
+    return coroutinesEngine.areAllStartJobsDone()
 }
+
+/**
+ * Hot [StateFlow] that reflects the current startup lifecycle.
+ *
+ * Transitions on the happy path: `IDLE → IN_PROGRESS → COMPLETED`.
+ * Transitions on failure: `IDLE → IN_PROGRESS → ERROR`
+ * (sibling jobs continue running under [kotlinx.coroutines.SupervisorJob]).
+ *
+ * @see StartupState
+ */
+val AppStartupInitializer.startupState: StateFlow<StartupState>
+    get() = coroutinesEngine.startupState
