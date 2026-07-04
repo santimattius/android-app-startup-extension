@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -37,5 +38,42 @@ class StartupAsyncInitializerTest {
         }
 
         assertEquals(Dispatchers.IO, initializer.dispatcher())
+    }
+
+    // ── priority() (startup-priority-staggering, ADR-1) ──────────────────────
+
+    @Test
+    fun `default priority() returns NORMAL`() {
+        val initializer = object : StartupAsyncInitializer<String> {
+            override suspend fun create(context: Context): String = "x"
+        }
+
+        assertEquals(
+            "An initializer with no priority() override must be treated as NORMAL (eager)",
+            StartupPriority.NORMAL,
+            initializer.priority(),
+        )
+    }
+
+    @Test
+    fun `overridden priority() returns the declared priority`() {
+        val initializer = object : StartupAsyncInitializer<String> {
+            override fun priority(): StartupPriority = StartupPriority.DEFERRED
+            override suspend fun create(context: Context): String = "x"
+        }
+
+        assertEquals(StartupPriority.DEFERRED, initializer.priority())
+    }
+
+    @Test
+    fun `enum ordinal order is CRITICAL then NORMAL then DEFERRED (most-eager = min ordinal)`() {
+        assertEquals("CRITICAL must be the most-eager (ordinal 0)", 0, StartupPriority.CRITICAL.ordinal)
+        assertEquals("NORMAL must sit between CRITICAL and DEFERRED (ordinal 1)", 1, StartupPriority.NORMAL.ordinal)
+        assertEquals("DEFERRED must be the least-eager (ordinal 2)", 2, StartupPriority.DEFERRED.ordinal)
+        assertTrue(
+            "min-ordinal comparison must rank CRITICAL as more eager than NORMAL and DEFERRED",
+            StartupPriority.CRITICAL.ordinal < StartupPriority.NORMAL.ordinal &&
+                StartupPriority.NORMAL.ordinal < StartupPriority.DEFERRED.ordinal,
+        )
     }
 }
