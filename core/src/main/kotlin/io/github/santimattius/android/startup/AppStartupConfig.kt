@@ -53,6 +53,9 @@ sealed class AsyncInitializerStrategy {
  *     maxConcurrentAsyncInitializers = 4                  // cap concurrent create() bodies
  *     defaultAsyncDispatcher         = Dispatchers.Default // library-wide default dispatcher
  *     strictModeConcurrencyThreshold = Runtime.getRuntime().availableProcessors()
+ *     // Priority staggering (StartupPriority.DEFERRED runs after the first frame):
+ *     deferredStartupTimeoutMs       = 5_000L             // headless flush fallback
+ *     // firstFrameSignal            = MyFirstFrameSignal() // optional custom trigger (default: Android first-draw)
  * }
  * ```
  */
