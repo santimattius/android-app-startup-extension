@@ -1,5 +1,8 @@
 package io.github.santimattius.android.startup
 
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+
 /**
  * Controls how sync initializers are ordered before execution begins.
  *
@@ -54,6 +57,9 @@ class AppStartupConfig private constructor(
     val debugLoggingEnabled: Boolean,
     val syncOrderingStrategy: SyncOrderingStrategy,
     val asyncInitializerStrategy: AsyncInitializerStrategy,
+    val maxConcurrentAsyncInitializers: Int?,
+    val defaultAsyncDispatcher: CoroutineDispatcher,
+    val strictModeConcurrencyThreshold: Int,
 ) {
     class Builder {
         var strictModeCheckEnabled: Boolean = false
@@ -61,11 +67,34 @@ class AppStartupConfig private constructor(
         var syncOrderingStrategy: SyncOrderingStrategy = SyncOrderingStrategy.Lazy
         var asyncInitializerStrategy: AsyncInitializerStrategy = AsyncInitializerStrategy.Concurrent
 
+        /**
+         * Maximum number of async initializers allowed to execute `create()` concurrently.
+         * `null` (default) means unbounded — current, unchanged behavior. Values `<= 0` are
+         * normalized to `null` (unbounded) at [build] time rather than deadlocking or throwing.
+         */
+        var maxConcurrentAsyncInitializers: Int? = null
+
+        /**
+         * Library-wide default dispatcher used to run async initializers that do not override
+         * [io.github.santimattius.android.startup.initializer.StartupAsyncInitializer.dispatcher].
+         * Defaults to [Dispatchers.Default], preserving current behavior.
+         */
+        var defaultAsyncDispatcher: CoroutineDispatcher = Dispatchers.Default
+
+        /**
+         * Concurrency level above which strict mode logs a warning. Defaults to the number of
+         * available processor cores, since [Dispatchers.Default]'s parallelism is core-bound.
+         */
+        var strictModeConcurrencyThreshold: Int = Runtime.getRuntime().availableProcessors()
+
         internal fun build() = AppStartupConfig(
             strictModeCheckEnabled = strictModeCheckEnabled,
             debugLoggingEnabled = debugLoggingEnabled,
             syncOrderingStrategy = syncOrderingStrategy,
             asyncInitializerStrategy = asyncInitializerStrategy,
+            maxConcurrentAsyncInitializers = maxConcurrentAsyncInitializers?.takeIf { it > 0 },
+            defaultAsyncDispatcher = defaultAsyncDispatcher,
+            strictModeConcurrencyThreshold = strictModeConcurrencyThreshold,
         )
     }
 
