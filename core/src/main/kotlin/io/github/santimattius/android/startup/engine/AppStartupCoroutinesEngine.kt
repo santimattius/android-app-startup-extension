@@ -3,6 +3,7 @@ package io.github.santimattius.android.startup.engine
 import android.util.Log
 import io.github.santimattius.android.startup.StartupState
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -14,6 +15,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.CoroutineContext
 
@@ -43,9 +45,15 @@ import kotlin.coroutines.CoroutineContext
  * @property _startJobs A synchronized [ArrayList] holding [Deferred] instances for launched startup jobs.
  *   Writes happen only during discovery (single-threaded) and reads only during await — no concurrent
  *   access in practice, but synchronized for correctness guarantees.
+ * @param cap Optional cap on the number of async `create()` bodies allowed to execute concurrently.
+ *   `null` (default) means unbounded — current, unchanged behavior. When set, backs an internal
+ *   [Semaphore] consumed via [acquireAsyncPermit]/[releaseAsyncPermit]. These primitives are
+ *   additive/inert on their own: they only bound concurrency once a caller actually invokes them
+ *   around the work being gated.
  */
 internal class AppStartupCoroutinesEngine(
-    coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
+    coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val cap: Int? = null,
 ) : CoroutineScope {
 
     private val dispatcher: CoroutineDispatcher = coroutineDispatcher
@@ -63,9 +71,46 @@ internal class AppStartupCoroutinesEngine(
     /** Hot [StateFlow] that reflects the current startup lifecycle state. */
     val startupState: StateFlow<StartupState> = _startupState.asStateFlow()
 
+    /** Snapshot of how many async `create()` bodies are currently active. Written via [enterActive]/[exitActive]. */
+    private val activeAsync = AtomicInteger(0)
+
+    /** Backs [acquireAsyncPermit]/[releaseAsyncPermit]. `null` when [cap] is `null` (unbounded). */
+    private val semaphore: Semaphore? = cap?.let(::Semaphore)
+
     fun <T> launchStartJob(block: suspend CoroutineScope.() -> T) {
         _startupState.value = StartupState.IN_PROGRESS
         _startJobs.add(async { block() })
+    }
+
+    /**
+     * Increments the active-async counter and returns the resulting snapshot.
+     *
+     * Call immediately before starting an async `create()` body; pair with a matching
+     * [exitActive] call in a `finally` block so the counter never leaks.
+     *
+     * @return the active count immediately after this increment — the concurrency snapshot
+     *   to attach to the corresponding `StartupMetric`.
+     */
+    fun enterActive(): Int = activeAsync.incrementAndGet()
+
+    /** Decrements the active-async counter. Must be paired with a prior [enterActive] call. */
+    fun exitActive() {
+        activeAsync.decrementAndGet()
+    }
+
+    /**
+     * Suspends until a permit is available when a concurrency [cap] is configured.
+     *
+     * No-op — never suspends — when [cap] is `null` (unbounded, default/current behavior).
+     * Must be paired with a matching [releaseAsyncPermit] call in a `finally` block.
+     */
+    suspend fun acquireAsyncPermit() {
+        semaphore?.acquire()
+    }
+
+    /** Releases a permit previously obtained via [acquireAsyncPermit]. No-op when [cap] is `null`. */
+    fun releaseAsyncPermit() {
+        semaphore?.release()
     }
 
     suspend fun awaitAllStartJobs() {

@@ -49,7 +49,10 @@ class AppStartupInitializer internal constructor(
     coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
 
-    internal val coroutinesEngine = AppStartupCoroutinesEngine(coroutineDispatcher ?: Dispatchers.Default)
+    internal val coroutinesEngine = AppStartupCoroutinesEngine(
+        coroutineDispatcher ?: Dispatchers.Default,
+        cap = config.maxConcurrentAsyncInitializers,
+    )
 
     private val metricsBus = StartupMetricsBus()
 
