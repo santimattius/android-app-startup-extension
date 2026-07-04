@@ -1,12 +1,18 @@
 package io.github.santimattius.android.startup.engine
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
@@ -20,6 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * calls [AppStartupCoroutinesEngine.acquireAsyncPermit]/[AppStartupCoroutinesEngine.releaseAsyncPermit]
  * from the hot path yet (that wiring is a separate follow-up change).
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class AppStartupCoroutinesEngineTest {
 
     // ── Phase 2: enterActive() / exitActive() ────────────────────────────────
@@ -183,5 +190,76 @@ class AppStartupCoroutinesEngineTest {
         }
 
         assertEquals(listOf("child", "parent"), order)
+    }
+
+    // ── startup-priority-staggering: deferred start jobs (ADR-4) ─────────────
+
+    @Test
+    fun `launchDeferredStartJob tracks the job in deferredStartJobs and not startJobs`() = runTest {
+        val engine = AppStartupCoroutinesEngine(StandardTestDispatcher(testScheduler))
+
+        engine.launchDeferredStartJob { /* no-op */ }
+
+        assertEquals(
+            "A deferred job must be tracked in the separate deferredStartJobs list",
+            1,
+            engine.deferredStartJobs.size,
+        )
+        assertTrue(
+            "A deferred job must NOT be added to the critical-path startJobs list",
+            engine.startJobs.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `awaitAllStartJobs returns without awaiting a deferred job suspended on an unresolved signal`() = runTest {
+        val engine = AppStartupCoroutinesEngine(StandardTestDispatcher(testScheduler))
+        val signal = CompletableDeferred<Unit>()
+        var eagerRan = false
+        var deferredRan = false
+
+        engine.launchStartJob { eagerRan = true }
+        engine.launchDeferredStartJob {
+            signal.await() // never resolved in this test
+            deferredRan = true
+        }
+
+        engine.awaitAllStartJobs()
+
+        assertTrue("The eager critical-path job must have run", eagerRan)
+        assertFalse(
+            "The deferred job must NOT run while its signal is unresolved",
+            deferredRan,
+        )
+        assertTrue(
+            "awaitAllStartJobs must return while the deferred job is still active (excluded from the await)",
+            engine.deferredStartJobs.single().isActive,
+        )
+
+        engine.cancel() // release the suspended deferred coroutine so runTest can drain
+    }
+
+    @Test
+    fun `deferred job runs once its signal resolves`() = runTest {
+        val engine = AppStartupCoroutinesEngine(StandardTestDispatcher(testScheduler))
+        val signal = CompletableDeferred<Unit>()
+        var deferredRan = false
+
+        engine.launchDeferredStartJob {
+            signal.await()
+            deferredRan = true
+        }
+
+        runCurrent()
+        assertFalse("Deferred work must not run before the signal resolves", deferredRan)
+
+        signal.complete(Unit)
+        runCurrent()
+
+        assertTrue("Deferred work must run after the signal resolves", deferredRan)
+        assertFalse(
+            "A completed deferred job must no longer be active",
+            engine.deferredStartJobs.single().isActive,
+        )
     }
 }
