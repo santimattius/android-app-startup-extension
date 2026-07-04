@@ -45,10 +45,14 @@ sealed class AsyncInitializerStrategy {
  * Construct via [AppStartupInitializer.configure]:
  * ```kotlin
  * AppStartupInitializer.configure {
- *     debugLoggingEnabled       = BuildConfig.DEBUG
- *     strictModeCheckEnabled    = BuildConfig.DEBUG
- *     syncOrderingStrategy      = SyncOrderingStrategy.Topological
- *     asyncInitializerStrategy  = AsyncInitializerStrategy.Validated
+ *     debugLoggingEnabled            = BuildConfig.DEBUG
+ *     strictModeCheckEnabled         = BuildConfig.DEBUG
+ *     syncOrderingStrategy           = SyncOrderingStrategy.Topological
+ *     asyncInitializerStrategy       = AsyncInitializerStrategy.Validated
+ *     // Coroutine storm mitigation (all optional, default-off):
+ *     maxConcurrentAsyncInitializers = 4                  // cap concurrent create() bodies
+ *     defaultAsyncDispatcher         = Dispatchers.Default // library-wide default dispatcher
+ *     strictModeConcurrencyThreshold = Runtime.getRuntime().availableProcessors()
  * }
  * ```
  */

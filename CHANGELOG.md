@@ -53,7 +53,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `IDLE → IN_PROGRESS → ERROR` when a job throws.
 - `StartupState` — enum with four states: `IDLE`, `IN_PROGRESS`, `COMPLETED`, `ERROR`.
 - `StartupMetric` — data class capturing per-initializer timing (`durationMs`), type (`isAsync`),
-  and outcome (`success`, `wasCancelled`).
+  and outcome (`success`, `wasCancelled`), plus async execution observability:
+  - `dispatcherName: String` — the dispatcher `create()` actually ran on (empty for sync).
+  - `threadName: String` — the thread `create()` actually ran on (empty for sync).
+  - `concurrentActiveCount: Int` — snapshot of how many async initializers were executing
+    `create()` when this one started (always `0` for sync).
+  - `queueDelayMs: Long` — time from becoming ready to run to actually starting (concurrency-cap
+    wait + dispatcher scheduling latency); the primary "coroutine storm" signal (always `0` for
+    sync).
 - `AppStartupInitializer.metricsFlow: SharedFlow<StartupMetric>` — hot SharedFlow that emits after
   each initializer completes. All values are replayed (`replay = Int.MAX_VALUE`), so late collectors
   still receive the full startup sequence. Replaces the former `metricsListener` callback.
@@ -65,8 +72,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `syncDependencies(): List<Class<out StartupSyncInitializer<*>>>` — declares sync initializers
   that must complete before this async initializer's `create()` is invoked. Each dependency is
   initialized at most once across all async initializers that share it.
-- `dispatcher(): CoroutineDispatcher` — overridable method to pin `create()` to a specific thread
-  pool. Defaults to `Dispatchers.Default`. Return `Dispatchers.IO` for disk or network work.
+- `dispatcher(): CoroutineDispatcher?` — overridable method to pin `create()` to a specific thread
+  pool. Return `Dispatchers.IO` for disk or network work. Returns `null` by default, meaning
+  "defer to the library default". Effective precedence: per-instance `dispatcher()` (non-null) >
+  `AppStartupConfig.defaultAsyncDispatcher` > `Dispatchers.Default`.
 - `retainAfterStartup(): Boolean` — overridable on both `StartupSyncInitializer` and
   `StartupAsyncInitializer`. Return `false` for side-effect-only initializers (migration runners,
   cache warmers, etc.) to have the library drop the result from its registry immediately after
@@ -78,6 +87,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovered and run automatically during startup.
 - `isEagerlyAsyncInitialized(component)` — returns `true` if the given async initializer was
   discovered and launched automatically during startup.
+
+#### Coroutine storm mitigation (observe, then bound)
+
+- `AppStartupConfig.maxConcurrentAsyncInitializers: Int?` — optional cap on how many async
+  `create()` bodies may run concurrently. Defaults to `null` (unbounded — unchanged behaviour).
+  Backed by a `kotlinx.coroutines.sync.Semaphore` acquired around each `create()`, applied
+  globally and independently of `AsyncInitializerStrategy`. Values `<= 0` are normalised to `null`
+  (unbounded) rather than deadlocking. Dependencies are always resolved *before* a permit is
+  acquired, so a parent never holds a permit while awaiting a child — no deadlock even at cap `1`.
+- `AppStartupConfig.defaultAsyncDispatcher: CoroutineDispatcher` — library-wide default dispatcher
+  for async initializers that do not override `dispatcher()`. Defaults to `Dispatchers.Default`.
+- `AppStartupConfig.strictModeConcurrencyThreshold: Int` — concurrency level above which strict
+  mode logs a warning. Defaults to `Runtime.getRuntime().availableProcessors()`.
+- Strict-mode concurrency warning — when `strictModeCheckEnabled` is on and the observed
+  `concurrentActiveCount` exceeds `strictModeConcurrencyThreshold`, the library logs a single
+  warning per startup (reporting the peak, threshold, dispatcher, and remediation). Silent when the
+  flag is off or concurrency stays within the threshold.
 
 ### Changed
 
@@ -95,6 +121,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cancellation propagates correctly instead of being wrapped in `StartupExtensionException`.
 - System tracing sections now use a `Startup::` prefix (e.g. `Startup::MyInitializer`) for easier
   identification in profiling tools.
+- `StartupAsyncInitializer.dispatcher()` return type changed from `CoroutineDispatcher` to the
+  nullable sentinel `CoroutineDispatcher?` (`null` = "use the library default"). This is
+  **source-compatible** for existing overrides (a non-null `CoroutineDispatcher` return type
+  validly overrides a `CoroutineDispatcher?` one via covariance) and **binary-compatible** (Kotlin
+  nullability is an annotation; the JVM descriptor is unchanged). Behavioural change: an
+  unoverridden initializer now honours `AppStartupConfig.defaultAsyncDispatcher` instead of always
+  using `Dispatchers.Default`.
+- `StartupMetric` gained four trailing fields with defaults (`dispatcherName`, `threadName`,
+  `concurrentActiveCount`, `queueDelayMs`), appended after `wasCancelled` so `component1..5` and
+  the existing getters stay ABI-stable. Because `StartupMetric` is library-emitted telemetry that
+  consumers *read* (getters + destructuring), this is treated as a MINOR-style additive change.
+  **Narrow binary-compatibility caveat:** the only affected ABI surface is the primary constructor
+  / `copy()` descriptor — recompilation is required *only* if your code constructs or copies a
+  `StartupMetric` (an anti-pattern for emitted telemetry). Adopting `binary-compatibility-validator`
+  is recommended so future changes to this DTO are caught deliberately.
 
 ### Fixed
 
