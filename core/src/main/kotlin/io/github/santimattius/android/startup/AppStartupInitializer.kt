@@ -379,9 +379,10 @@ class AppStartupInitializer internal constructor(
                     val startNs = System.nanoTime()
                     var success = false
                     var wasCancelled = false
-                    val initializerDispatcher = asyncInitializer.dispatcher()
+                    val effectiveDispatcher =
+                        asyncInitializer.dispatcher() ?: config.defaultAsyncDispatcher
                     try {
-                        val result = withContext(initializerDispatcher) {
+                        val result = withContext(effectiveDispatcher) {
                             asyncInitializer.create(applicationContext)
                         }
                         success = true
