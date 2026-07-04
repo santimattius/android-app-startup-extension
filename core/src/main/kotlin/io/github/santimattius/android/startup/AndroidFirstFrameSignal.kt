@@ -18,11 +18,10 @@ import kotlinx.coroutines.CompletableDeferred
  * - if the cast is `null` (headless process / no `Application`), the deferred **never
  *   self-completes**; the deferred-startup gate relies on the `deferredStartupTimeoutMs` fallback.
  *
- * ## Not unit-tested under Robolectric
+ * ## Testing
  *
- * Android activity-lifecycle first-draw detection is intentionally NOT covered by unit tests
- * (per the change's design/scope decision). Core scheduling is verified through injected fakes via
- * the [FirstFrameSignal] seam; this class is kept minimal on purpose.
+ * Core scheduling is verified through injected fakes via the [FirstFrameSignal] seam. The Android
+ * lifecycle path is covered by [AndroidFirstFrameSignalTest].
  *
  * ## Leak safety
  *

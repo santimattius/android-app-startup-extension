@@ -248,6 +248,36 @@ class DeferredStartupGatingTest {
         initializer.coroutinesEngine.cancel()
     }
 
+    // ── Priority inversion: clamped DEFERRED dep launches eagerly (integration) ─
+
+    @Test
+    fun `inversion clamp launches a DEFERRED dependency eagerly without waiting for the frame signal`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val fake = FakeFirstFrameSignal() // never fired
+        AppStartupInitializer.configure {
+            firstFrameSignal = fake
+            defaultAsyncDispatcher = dispatcher
+            asyncInitializerStrategy = AsyncInitializerStrategy.Validated
+        }
+        val initializer = AppStartupInitializer(context, dispatcher)
+        stubManifest(InversionNormalRoot::class.java)
+
+        initializer.discoverAndInitialize(InitializationProvider::class.java)
+        advanceUntilIdle()
+
+        assertTrue(
+            "The clamped DEFERRED dependency must run eagerly (not gated behind the frame)",
+            created.contains("InversionDeferredDep"),
+        )
+        assertTrue("The eager root must complete", created.contains("InversionNormalRoot"))
+        assertTrue(
+            "The dependency must resolve before the root's create() body",
+            created.indexOf("InversionDeferredDep") < created.indexOf("InversionNormalRoot"),
+        )
+
+        initializer.coroutinesEngine.cancel()
+    }
+
     // ── Manifest stubbing helper (mirrors AsyncConcurrencyGatingTest) ─────────
 
     private fun stubManifest(vararg classes: Class<*>) {
@@ -324,6 +354,24 @@ class DeferredStartupGatingTest {
         override suspend fun create(context: Context): String {
             created += "CapDeferred"
             return "capDeferred"
+        }
+    }
+
+    private class InversionDeferredDep : StartupAsyncInitializer<String> {
+        override fun priority(): StartupPriority = StartupPriority.DEFERRED
+        override suspend fun create(context: Context): String {
+            created += "InversionDeferredDep"
+            return "deferredDep"
+        }
+    }
+
+    private class InversionNormalRoot : StartupAsyncInitializer<String> {
+        override fun dependencies(): List<Class<out StartupAsyncInitializer<*>>> =
+            listOf(InversionDeferredDep::class.java)
+
+        override suspend fun create(context: Context): String {
+            created += "InversionNormalRoot"
+            return "root"
         }
     }
 }

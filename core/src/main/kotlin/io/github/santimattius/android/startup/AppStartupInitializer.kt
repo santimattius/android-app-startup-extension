@@ -8,6 +8,7 @@ import android.content.pm.PackageManager.GET_META_DATA
 import android.os.Bundle
 import android.os.StrictMode
 import android.os.Trace
+import android.util.Log
 import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
@@ -712,8 +713,9 @@ class AppStartupInitializer internal constructor(
      * initializer depends — directly or transitively — on a [StartupPriority.DEFERRED] one. Deferring
      * that dependency past the first frame would strand the eager dependent, so its EFFECTIVE priority
      * is clamped **up** to the most-eager (minimum ordinal) declared priority among its transitive
-     * dependents, and a one-time warning is emitted via [StartupExtensionLogger] (gated by
-     * `debugLoggingEnabled`). A DEFERRED node with no eager dependent keeps its declared priority.
+     * dependents, and a one-time warning is always emitted via `Log.w` (not gated by
+     * `debugLoggingEnabled`, since a priority inversion is a graph misconfiguration developers
+     * must see). A DEFERRED node with no eager dependent keeps its declared priority.
      *
      * This is a pure read-only pass: it instantiates each discovered node once (the same reflection
      * the graph validators already use), builds a reverse-adjacency map (dependency -> dependents),
@@ -768,9 +770,9 @@ class AppStartupInitializer internal constructor(
     }
 
     /**
-     * Emits a single priority-inversion warning per startup (per initializer instance) via the
-     * library's [StartupExtensionLogger] seam. The [AtomicBoolean] guard keeps it to one message
-     * even when several DEFERRED nodes are clamped.
+     * Emits a single priority-inversion warning per startup (per initializer instance). The
+     * warning always surfaces via `Log.w` (not gated by `debugLoggingEnabled`). The
+     * [AtomicBoolean] guard keeps it to one message even when several DEFERRED nodes are clamped.
      */
     private fun warnPriorityInversionOnce(
         node: Class<out StartupAsyncInitializer<*>>,
@@ -778,14 +780,14 @@ class AppStartupInitializer internal constructor(
     ) {
         if (!inversionWarned.compareAndSet(false, true)) return
 
-        StartupExtensionLogger.warning(
+        Log.w(
+            STARTUP_LOG_TAG,
             "Detected startup priority inversion: DEFERRED initializer ${node.simpleName} is required " +
                 "by an eager ($clampedTo) initializer, so its effective priority is clamped up to " +
                 "$clampedTo and it will launch eagerly (not after the first frame). Review the " +
-                "dependency graph or the priority() overrides to remove the inversion."
+                "dependency graph or the priority() overrides to remove the inversion.",
         )
     }
-
 
     /**
      * Emits a single strict-mode warning per startup when the observed async-concurrency
@@ -829,6 +831,7 @@ class AppStartupInitializer internal constructor(
     }
 
     companion object {
+        private const val STARTUP_LOG_TAG = "StartupLogger"
         private const val KEY_SYNC_INITIALIZER = "sync-initializer"
         private const val KEY_ASYNC_INITIALIZER = "async-initializer"
         private const val SECTION_NAME = "StartupExtension"

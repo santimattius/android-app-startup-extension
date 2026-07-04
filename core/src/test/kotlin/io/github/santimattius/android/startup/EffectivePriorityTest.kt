@@ -24,8 +24,8 @@ import org.robolectric.shadows.ShadowLog
  * dependent (min ordinal) and a single warning is emitted. It never rejects a valid graph.
  *
  * These tests assert the clamp result directly (no launches) plus the once-only warning via
- * [ShadowLog]. The warning goes through [StartupExtensionLogger], so `debugLoggingEnabled` is turned
- * on to route it to `Log.w`.
+ * [ShadowLog]. The inversion warning always surfaces via `Log.w`, independent of
+ * `debugLoggingEnabled`.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [Build.VERSION_CODES.S])
@@ -120,7 +120,6 @@ class EffectivePriorityTest {
 
     @Test
     fun `emits the inversion warning at most once per initializer`() {
-        AppStartupInitializer.configure { debugLoggingEnabled = true }
         val initializer = AppStartupInitializer(context)
         val discovered = setOf(NormalDependsOnDeferred::class.java, DeferredDep::class.java)
 
@@ -129,6 +128,22 @@ class EffectivePriorityTest {
 
         assertEquals(
             "The priority-inversion warning must be emitted at most once per startup",
+            1,
+            inversionWarnings(),
+        )
+    }
+
+    @Test
+    fun `emits the inversion warning even when debugLoggingEnabled is false`() {
+        AppStartupInitializer.configure { debugLoggingEnabled = false }
+        val initializer = AppStartupInitializer(context)
+
+        initializer.computeEffectivePriorities(
+            setOf(NormalDependsOnDeferred::class.java, DeferredDep::class.java),
+        )
+
+        assertEquals(
+            "Priority-inversion warnings must not depend on debugLoggingEnabled",
             1,
             inversionWarnings(),
         )
