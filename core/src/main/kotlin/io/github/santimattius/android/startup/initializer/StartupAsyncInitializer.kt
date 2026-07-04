@@ -99,15 +99,25 @@ interface StartupAsyncInitializer<T : Any> {
     fun syncDependencies(): List<Class<out StartupSyncInitializer<*>>> = emptyList()
 
     /**
-     * Returns the [CoroutineDispatcher] on which [create] will be executed.
+     * Returns the [CoroutineDispatcher] on which [create] will be executed, or `null` to defer
+     * to the library-wide default.
      *
      * Override this to pin the initializer's work to a specific thread pool. For example,
      * return [Dispatchers.IO] for disk or network I/O, or a dedicated single-thread dispatcher
      * for components that require thread confinement.
      *
-     * Defaults to [Dispatchers.Default].
+     * ## Resolution precedence
+     *
+     * The dispatcher `create()` actually runs on is resolved in this order:
+     * 1. This method's non-null return value (per-instance override — highest precedence).
+     * 2. `AppStartupConfig.defaultAsyncDispatcher` (library-wide default).
+     * 3. [Dispatchers.Default] (the ultimate fallback that `defaultAsyncDispatcher` itself defaults to).
+     *
+     * Returning `null` (the default) means "I have no preference — use the library default". This
+     * nullable sentinel is what lets the library distinguish an unoverridden initializer from one
+     * that explicitly chose [Dispatchers.Default].
      */
-    fun dispatcher(): CoroutineDispatcher = Dispatchers.Default
+    fun dispatcher(): CoroutineDispatcher? = null
 
     /**
      * Whether the instance returned by [create] should be kept in the initializer registry
