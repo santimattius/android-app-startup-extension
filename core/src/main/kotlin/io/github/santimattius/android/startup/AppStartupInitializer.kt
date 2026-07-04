@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.Volatile
 
 /**
@@ -88,6 +89,12 @@ class AppStartupInitializer internal constructor(
 
     private val syncLock = Any()
     private val mutex = Mutex()
+
+    /**
+     * Guards the strict-mode concurrency warning so it is emitted AT MOST ONCE per startup
+     * (per initializer instance), regardless of how many initializers breach the threshold.
+     */
+    private val strictModeConcurrencyWarned = AtomicBoolean(false)
 
     /**
      * Initializes a component of type [T] using its corresponding [StartupSyncInitializer].
@@ -388,6 +395,7 @@ class AppStartupInitializer internal constructor(
                     val requestedNs = System.nanoTime()
                     coroutinesEngine.acquireAsyncPermit()
                     val activeSnapshot = coroutinesEngine.enterActive()
+                    maybeWarnStrictModeConcurrency(activeSnapshot, effectiveDispatcher)
 
                     var success = false
                     var wasCancelled = false
@@ -661,6 +669,30 @@ class AppStartupInitializer internal constructor(
         return discovered - allDeclaredDependencies
     }
 
+
+    /**
+     * Emits a single strict-mode warning per startup when the observed async-concurrency
+     * [snapshot] exceeds [AppStartupConfig.strictModeConcurrencyThreshold].
+     *
+     * Only fires when [AppStartupConfig.strictModeCheckEnabled] is on. The [AtomicBoolean] guard
+     * ensures at most one warning per initializer instance to avoid log spam when many
+     * initializers breach the threshold simultaneously. The message reports the observed peak,
+     * the configured threshold, the dispatcher in use, and the two remediations (ADR-4).
+     */
+    private fun maybeWarnStrictModeConcurrency(snapshot: Int, dispatcher: CoroutineDispatcher) {
+        if (!config.strictModeCheckEnabled) return
+        if (snapshot <= config.strictModeConcurrencyThreshold) return
+        if (!strictModeConcurrencyWarned.compareAndSet(false, true)) return
+
+        StartupExtensionLogger.warning(
+            "Async startup concurrency reached $snapshot concurrently-active initializers, " +
+                "exceeding strictModeConcurrencyThreshold=${config.strictModeConcurrencyThreshold} " +
+                "on dispatcher $dispatcher. This can indicate a coroutine storm (thread " +
+                "oversubscription). Remediation: set AppStartupConfig.maxConcurrentAsyncInitializers " +
+                "to cap concurrency, or set a more suitable defaultAsyncDispatcher / per-initializer " +
+                "dispatcher()."
+        )
+    }
 
     /**
      * Validates that [component] is a concrete, instantiable class before attempting reflection.
