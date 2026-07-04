@@ -64,6 +64,8 @@ class AppStartupConfig private constructor(
     val maxConcurrentAsyncInitializers: Int?,
     val defaultAsyncDispatcher: CoroutineDispatcher,
     val strictModeConcurrencyThreshold: Int,
+    val firstFrameSignal: FirstFrameSignal?,
+    val deferredStartupTimeoutMs: Long,
 ) {
     class Builder {
         var strictModeCheckEnabled: Boolean = false
@@ -91,6 +93,24 @@ class AppStartupConfig private constructor(
          */
         var strictModeConcurrencyThreshold: Int = Runtime.getRuntime().availableProcessors()
 
+        /**
+         * Optional [FirstFrameSignal] that gates [StartupPriority.DEFERRED] async initializers.
+         * `null` (default) means the scheduler resolves the internal Android first-draw default
+         * lazily — keeping this static config free of any `Context`/`Activity` reference. Inject a
+         * fake here to drive deferred scheduling deterministically under test.
+         */
+        var firstFrameSignal: FirstFrameSignal? = null
+
+        /**
+         * Upper bound (ms) the deferred-startup gate waits for the first frame before flushing
+         * [StartupPriority.DEFERRED] work anyway. Guarantees headless/no-UI processes (which never
+         * draw a frame) still run their deferred initializers. Defaults to `5_000L`.
+         *
+         * A value `<= 0` makes the gate return immediately (`withTimeoutOrNull(0)`), so deferred
+         * work flushes without waiting for a frame — a documented escape hatch, not a bug.
+         */
+        var deferredStartupTimeoutMs: Long = 5_000L
+
         internal fun build() = AppStartupConfig(
             strictModeCheckEnabled = strictModeCheckEnabled,
             debugLoggingEnabled = debugLoggingEnabled,
@@ -99,6 +119,8 @@ class AppStartupConfig private constructor(
             maxConcurrentAsyncInitializers = maxConcurrentAsyncInitializers?.takeIf { it > 0 },
             defaultAsyncDispatcher = defaultAsyncDispatcher,
             strictModeConcurrencyThreshold = strictModeConcurrencyThreshold,
+            firstFrameSignal = firstFrameSignal,
+            deferredStartupTimeoutMs = deferredStartupTimeoutMs,
         )
     }
 

@@ -1,14 +1,28 @@
 package io.github.santimattius.android.startup
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppStartupConfigTest {
+
+    /**
+     * Inline fake [FirstFrameSignal] backed by a [CompletableDeferred] so tests can drive the
+     * deferred-startup gate deterministically (no real Android frame). [fire] resolves the signal.
+     */
+    private class FakeFirstFrameSignal : FirstFrameSignal {
+        private val deferred = CompletableDeferred<Unit>()
+        override suspend fun await() = deferred.await()
+        fun fire() {
+            deferred.complete(Unit)
+        }
+    }
 
     @After
     fun resetConfig() {
@@ -141,5 +155,54 @@ class AppStartupConfigTest {
         }.build()
 
         assertEquals(8, config.strictModeConcurrencyThreshold)
+    }
+
+    // ── firstFrameSignal (startup-priority-staggering, ADR-2) ────────────────
+
+    @Test
+    fun `default firstFrameSignal is null`() {
+        val config = AppStartupConfig.Builder().build()
+
+        assertNull(
+            "firstFrameSignal must default to null so the scheduler resolves the Android default lazily",
+            config.firstFrameSignal,
+        )
+    }
+
+    @Test
+    fun `Builder reflects configured firstFrameSignal and it survives build unchanged`() {
+        val fake = FakeFirstFrameSignal()
+
+        val config = AppStartupConfig.Builder().apply {
+            firstFrameSignal = fake
+        }.build()
+
+        assertSame(
+            "An injected firstFrameSignal must be preserved verbatim through build()",
+            fake,
+            config.firstFrameSignal,
+        )
+    }
+
+    // ── deferredStartupTimeoutMs (startup-priority-staggering, ADR-5) ────────
+
+    @Test
+    fun `default deferredStartupTimeoutMs is 5000`() {
+        val config = AppStartupConfig.Builder().build()
+
+        assertEquals(
+            "Headless/no-UI processes must eventually flush DEFERRED work via a 5s default timeout",
+            5_000L,
+            config.deferredStartupTimeoutMs,
+        )
+    }
+
+    @Test
+    fun `Builder reflects configured deferredStartupTimeoutMs`() {
+        val config = AppStartupConfig.Builder().apply {
+            deferredStartupTimeoutMs = 1_234L
+        }.build()
+
+        assertEquals(1_234L, config.deferredStartupTimeoutMs)
     }
 }
