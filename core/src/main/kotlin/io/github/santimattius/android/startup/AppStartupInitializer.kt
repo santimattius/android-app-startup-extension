@@ -97,6 +97,12 @@ class AppStartupInitializer internal constructor(
     private val strictModeConcurrencyWarned = AtomicBoolean(false)
 
     /**
+     * Guards the priority-inversion warning so it is emitted AT MOST ONCE per startup
+     * (per initializer instance), regardless of how many DEFERRED nodes are clamped.
+     */
+    private val inversionWarned = AtomicBoolean(false)
+
+    /**
      * Initializes a component of type [T] using its corresponding [StartupSyncInitializer].
      *
      * This function takes a class representing a [StartupSyncInitializer] and performs the initialization
@@ -667,6 +673,88 @@ class AppStartupInitializer internal constructor(
         }
 
         return discovered - allDeclaredDependencies
+    }
+
+    /**
+     * Computes the **effective** [StartupPriority] of every discovered async initializer, resolving
+     * priority inversions (ADR-6, spec "Priority inversion clamp and warn").
+     *
+     * A priority inversion occurs when an eager ([StartupPriority.NORMAL]/[StartupPriority.CRITICAL])
+     * initializer depends — directly or transitively — on a [StartupPriority.DEFERRED] one. Deferring
+     * that dependency past the first frame would strand the eager dependent, so its EFFECTIVE priority
+     * is clamped **up** to the most-eager (minimum ordinal) declared priority among its transitive
+     * dependents, and a one-time warning is emitted via [StartupExtensionLogger] (gated by
+     * `debugLoggingEnabled`). A DEFERRED node with no eager dependent keeps its declared priority.
+     *
+     * This is a pure read-only pass: it instantiates each discovered node once (the same reflection
+     * the graph validators already use), builds a reverse-adjacency map (dependency -> dependents),
+     * and runs a visited-guarded DFS over the reverse edges so self- and mutual-dependencies cannot
+     * loop. It launches nothing.
+     *
+     * @param discovered the set of discovered async initializer classes to classify.
+     * @return a map from each discovered class to its effective [StartupPriority].
+     */
+    internal fun computeEffectivePriorities(
+        discovered: Set<Class<out StartupAsyncInitializer<*>>>,
+    ): Map<Class<out StartupAsyncInitializer<*>>, StartupPriority> {
+        if (discovered.isEmpty()) return emptyMap()
+
+        val declared = mutableMapOf<Class<out StartupAsyncInitializer<*>>, StartupPriority>()
+        val dependents = mutableMapOf<Class<out StartupAsyncInitializer<*>>, MutableList<Class<out StartupAsyncInitializer<*>>>>()
+
+        discovered.forEach { cls ->
+            val initializer = cls.getDeclaredConstructor().newInstance() as StartupAsyncInitializer<*>
+            declared[cls] = initializer.priority()
+            initializer.dependencies()
+                .filter { it in discovered }
+                .forEach { dep -> dependents.getOrPut(dep) { mutableListOf() }.add(cls) }
+        }
+
+        val effective = declared.toMutableMap()
+
+        declared.filterValues { it == StartupPriority.DEFERRED }.keys.forEach { deferredNode ->
+            var clampTarget: StartupPriority? = null
+            val visited = mutableSetOf<Class<out StartupAsyncInitializer<*>>>()
+            val stack = ArrayDeque(dependents[deferredNode].orEmpty())
+            while (stack.isNotEmpty()) {
+                val dependent = stack.removeLast()
+                if (!visited.add(dependent)) continue // visited-guard => cycle-safe
+
+                val dependentPriority = declared[dependent] ?: StartupPriority.NORMAL
+                if (dependentPriority != StartupPriority.DEFERRED &&
+                    (clampTarget == null || dependentPriority.ordinal < clampTarget.ordinal)
+                ) {
+                    clampTarget = dependentPriority
+                }
+                dependents[dependent]?.let(stack::addAll)
+            }
+
+            clampTarget?.let { target ->
+                effective[deferredNode] = target
+                warnPriorityInversionOnce(deferredNode, target)
+            }
+        }
+
+        return effective
+    }
+
+    /**
+     * Emits a single priority-inversion warning per startup (per initializer instance) via the
+     * library's [StartupExtensionLogger] seam. The [AtomicBoolean] guard keeps it to one message
+     * even when several DEFERRED nodes are clamped.
+     */
+    private fun warnPriorityInversionOnce(
+        node: Class<out StartupAsyncInitializer<*>>,
+        clampedTo: StartupPriority,
+    ) {
+        if (!inversionWarned.compareAndSet(false, true)) return
+
+        StartupExtensionLogger.warning(
+            "Detected startup priority inversion: DEFERRED initializer ${node.simpleName} is required " +
+                "by an eager ($clampedTo) initializer, so its effective priority is clamped up to " +
+                "$clampedTo and it will launch eagerly (not after the first frame). Review the " +
+                "dependency graph or the priority() overrides to remove the inversion."
+        )
     }
 
 
