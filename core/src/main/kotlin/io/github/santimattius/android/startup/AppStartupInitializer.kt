@@ -376,13 +376,27 @@ class AppStartupInitializer internal constructor(
                         .forEach { doInitialize<Any>(it) }
 
                     StartupExtensionLogger.info("Initializing ${component.name}")
-                    val startNs = System.nanoTime()
-                    var success = false
-                    var wasCancelled = false
                     val effectiveDispatcher =
                         asyncInitializer.dispatcher() ?: config.defaultAsyncDispatcher
+
+                    // Dependencies are fully resolved above (deps + syncDependencies), so this clock
+                    // starts AFTER dependency resolution and BEFORE the concurrency permit is
+                    // acquired. queueDelayMs therefore measures semaphore backpressure + dispatcher
+                    // scheduling latency only — the storm signal (ADR-5). The permit is acquired here,
+                    // not around dependency resolution, so a parent never holds a permit while waiting
+                    // on a child's permit — no deadlock even at cap=1 (ADR-2).
+                    val requestedNs = System.nanoTime()
+                    coroutinesEngine.acquireAsyncPermit()
+                    val activeSnapshot = coroutinesEngine.enterActive()
+
+                    var success = false
+                    var wasCancelled = false
+                    var startedNs = requestedNs
+                    var executionThreadName = ""
                     try {
                         val result = withContext(effectiveDispatcher) {
+                            startedNs = System.nanoTime()
+                            executionThreadName = Thread.currentThread().name
                             asyncInitializer.create(applicationContext)
                         }
                         success = true
@@ -392,13 +406,19 @@ class AppStartupInitializer internal constructor(
                         wasCancelled = true
                         throw e
                     } finally {
+                        coroutinesEngine.exitActive()
+                        coroutinesEngine.releaseAsyncPermit()
                         metricsBus.publish(
                             StartupMetric(
                                 initializerName = component.simpleName,
-                                durationMs = (System.nanoTime() - startNs) / 1_000_000L,
+                                durationMs = (System.nanoTime() - startedNs) / 1_000_000L,
                                 isAsync = true,
                                 success = success,
                                 wasCancelled = wasCancelled,
+                                dispatcherName = effectiveDispatcher.toString(),
+                                threadName = executionThreadName,
+                                concurrentActiveCount = activeSnapshot,
+                                queueDelayMs = (startedNs - requestedNs) / 1_000_000L,
                             )
                         )
                     }
