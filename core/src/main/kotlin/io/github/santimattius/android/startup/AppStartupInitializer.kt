@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
@@ -608,10 +609,38 @@ class AppStartupInitializer internal constructor(
             is AsyncInitializerStrategy.Validated -> asyncValidateAndGetRoots(asyncDiscovered)
         }
 
-        toLaunch.forEach { initializer ->
+        // Resolve priority inversions first (clamps a DEFERRED node up to its most-eager transitive
+        // dependent and warns once), then partition the roots we are about to launch by EFFECTIVE
+        // priority. Eager (NORMAL/CRITICAL — CRITICAL behaves like NORMAL in v1) roots launch
+        // immediately on the critical path; DEFERRED roots are gated behind the first-frame signal.
+        val effective = computeEffectivePriorities(asyncDiscovered)
+        val (deferredRoots, eagerRoots) = toLaunch.partition {
+            effective[it] == StartupPriority.DEFERRED
+        }
+
+        eagerRoots.forEach { initializer ->
             // Each job gets its own initializing set: cycle detection is per-chain,
             // and sharing a mutable set across concurrent coroutines is a data race.
             coroutinesEngine.launchStartJob { doAsyncInitialize<Any>(initializer, HashSet()) }
+        }
+
+        if (deferredRoots.isNotEmpty()) {
+            // Resolve the effective signal ONCE so every deferred root shares a single frame
+            // signal / lifecycle registration. Resolved lazily (only when something is actually
+            // deferred) so the static config never needs to hold a Context.
+            val signal = config.firstFrameSignal ?: AndroidFirstFrameSignal(applicationContext)
+            deferredRoots.forEach { initializer ->
+                // The gate (frame await + timeout) lives OUTSIDE the untouched doAsyncInitialize:
+                // this coroutine holds NO concurrency permit while suspended on the signal (the
+                // permit is acquired later, inside doAsyncInitialize, after deps resolve) — so cap=1
+                // never deadlocks. withTimeoutOrNull swallows only its OWN timeout (headless flush)
+                // and rethrows any external CancellationException. Tracked in _deferredStartJobs, so
+                // awaitAllStartJobs() never awaits it.
+                coroutinesEngine.launchDeferredStartJob {
+                    withTimeoutOrNull(config.deferredStartupTimeoutMs) { signal.await() }
+                    doAsyncInitialize<Any>(initializer, HashSet())
+                }
+            }
         }
     }
 
