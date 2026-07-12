@@ -66,6 +66,20 @@ internal class AppStartupCoroutinesEngine(
     val startJobs: List<Deferred<*>>
         get() = _startJobs
 
+    /**
+     * Jobs for [StartupPriority.DEFERRED] roots, tracked SEPARATELY from [_startJobs] so the
+     * critical-path [awaitAllStartJobs] never awaits them. This is what keeps a `runBlocking`
+     * consumer (or cap=1) from deadlocking on work that is intentionally suspended on the
+     * first-frame signal.
+     *
+     * @see io.github.santimattius.android.startup.StartupPriority.DEFERRED
+     */
+    private val _deferredStartJobs: MutableList<Deferred<*>> = Collections.synchronizedList(ArrayList())
+
+    /** Read-only view of the currently tracked deferred start jobs (for tests/diagnostics). */
+    val deferredStartJobs: List<Deferred<*>>
+        get() = _deferredStartJobs
+
     private val _startupState = MutableStateFlow(StartupState.IDLE)
 
     /** Hot [StateFlow] that reflects the current startup lifecycle state. */
@@ -80,6 +94,22 @@ internal class AppStartupCoroutinesEngine(
     fun <T> launchStartJob(block: suspend CoroutineScope.() -> T) {
         _startupState.value = StartupState.IN_PROGRESS
         _startJobs.add(async { block() })
+    }
+
+    /**
+     * Launches a DEFERRED start job as an `async` child of the engine's [SupervisorJob], tracked in
+     * [_deferredStartJobs] (NOT [_startJobs]).
+     *
+     * The caller is expected to gate [block] on the first-frame signal (with a timeout fallback)
+     * before doing any real work. Because these jobs are excluded from [awaitAllStartJobs], the
+     * critical-path await returns without waiting for them — no deadlock at cap=1 or under
+     * `runBlocking`. As a [SupervisorJob] child, a failing deferred job is isolated from siblings and
+     * — being never awaited — never surfaces as an unhandled-exception crash.
+     *
+     * This is a callable primitive only; it does not itself touch the first-frame signal.
+     */
+    fun <T> launchDeferredStartJob(block: suspend CoroutineScope.() -> T) {
+        _deferredStartJobs.add(async { block() })
     }
 
     /**

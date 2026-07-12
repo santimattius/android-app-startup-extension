@@ -1,6 +1,7 @@
 package io.github.santimattius.android.startup.initializer
 
 import android.content.Context
+import io.github.santimattius.android.startup.StartupPriority
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 
@@ -118,6 +119,36 @@ interface StartupAsyncInitializer<T : Any> {
      * that explicitly chose [Dispatchers.Default].
      */
     fun dispatcher(): CoroutineDispatcher? = null
+
+    /**
+     * Returns the [StartupPriority] that controls **when** this initializer is launched during startup.
+     *
+     * ## Default — [StartupPriority.NORMAL] (eager)
+     *
+     * With no override the initializer is treated as `NORMAL` and launched immediately on the eager
+     * critical path, exactly like every initializer prior to this feature. This is an **additive
+     * default method** (same source+binary-compatible pattern as the [dispatcher] sentinel), so
+     * existing initializers keep their current behavior with zero changes.
+     *
+     * ## Override to [StartupPriority.DEFERRED]
+     *
+     * Return `DEFERRED` for work that is safe to run **after the first frame is drawn** — for
+     * example, analytics warmers or prefetchers that must not compete with UI-critical startup.
+     * A `DEFERRED` root's [create] is not invoked until the injected
+     * [io.github.santimattius.android.startup.FirstFrameSignal] resolves, or the configured
+     * `deferredStartupTimeoutMs` elapses (headless/no-UI fallback).
+     *
+     * ## [StartupPriority.CRITICAL] in v1
+     *
+     * `CRITICAL` currently behaves **identically to `NORMAL`** (it partitions as eager, does not
+     * bypass the concurrency cap, and is not ordered ahead of `NORMAL`). It is reserved for a future
+     * strict scheduler; the ordinal distinction only feeds the priority-inversion clamp today.
+     *
+     * > **Priority inversion:** if an eager (`NORMAL`/`CRITICAL`) initializer depends transitively on
+     * > a `DEFERRED` one, the library clamps the `DEFERRED` dependency's *effective* priority up to its
+     * > most-eager dependent (so it runs eagerly, not after the frame) and logs a one-time warning.
+     */
+    fun priority(): StartupPriority = StartupPriority.NORMAL
 
     /**
      * Whether the instance returned by [create] should be kept in the initializer registry

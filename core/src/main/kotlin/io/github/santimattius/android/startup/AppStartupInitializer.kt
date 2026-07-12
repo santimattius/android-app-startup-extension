@@ -8,6 +8,7 @@ import android.content.pm.PackageManager.GET_META_DATA
 import android.os.Bundle
 import android.os.StrictMode
 import android.os.Trace
+import android.util.Log
 import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
@@ -16,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
@@ -95,6 +97,12 @@ class AppStartupInitializer internal constructor(
      * (per initializer instance), regardless of how many initializers breach the threshold.
      */
     private val strictModeConcurrencyWarned = AtomicBoolean(false)
+
+    /**
+     * Guards the priority-inversion warning so it is emitted AT MOST ONCE per startup
+     * (per initializer instance), regardless of how many DEFERRED nodes are clamped.
+     */
+    private val inversionWarned = AtomicBoolean(false)
 
     /**
      * Initializes a component of type [T] using its corresponding [StartupSyncInitializer].
@@ -602,10 +610,38 @@ class AppStartupInitializer internal constructor(
             is AsyncInitializerStrategy.Validated -> asyncValidateAndGetRoots(asyncDiscovered)
         }
 
-        toLaunch.forEach { initializer ->
+        // Resolve priority inversions first (clamps a DEFERRED node up to its most-eager transitive
+        // dependent and warns once), then partition the roots we are about to launch by EFFECTIVE
+        // priority. Eager (NORMAL/CRITICAL — CRITICAL behaves like NORMAL in v1) roots launch
+        // immediately on the critical path; DEFERRED roots are gated behind the first-frame signal.
+        val effective = computeEffectivePriorities(asyncDiscovered)
+        val (deferredRoots, eagerRoots) = toLaunch.partition {
+            effective[it] == StartupPriority.DEFERRED
+        }
+
+        eagerRoots.forEach { initializer ->
             // Each job gets its own initializing set: cycle detection is per-chain,
             // and sharing a mutable set across concurrent coroutines is a data race.
             coroutinesEngine.launchStartJob { doAsyncInitialize<Any>(initializer, HashSet()) }
+        }
+
+        if (deferredRoots.isNotEmpty()) {
+            // Resolve the effective signal ONCE so every deferred root shares a single frame
+            // signal / lifecycle registration. Resolved lazily (only when something is actually
+            // deferred) so the static config never needs to hold a Context.
+            val signal = config.firstFrameSignal ?: AndroidFirstFrameSignal(applicationContext)
+            deferredRoots.forEach { initializer ->
+                // The gate (frame await + timeout) lives OUTSIDE the untouched doAsyncInitialize:
+                // this coroutine holds NO concurrency permit while suspended on the signal (the
+                // permit is acquired later, inside doAsyncInitialize, after deps resolve) — so cap=1
+                // never deadlocks. withTimeoutOrNull swallows only its OWN timeout (headless flush)
+                // and rethrows any external CancellationException. Tracked in _deferredStartJobs, so
+                // awaitAllStartJobs() never awaits it.
+                coroutinesEngine.launchDeferredStartJob {
+                    withTimeoutOrNull(config.deferredStartupTimeoutMs) { signal.await() }
+                    doAsyncInitialize<Any>(initializer, HashSet())
+                }
+            }
         }
     }
 
@@ -669,6 +705,89 @@ class AppStartupInitializer internal constructor(
         return discovered - allDeclaredDependencies
     }
 
+    /**
+     * Computes the **effective** [StartupPriority] of every discovered async initializer, resolving
+     * priority inversions (ADR-6, spec "Priority inversion clamp and warn").
+     *
+     * A priority inversion occurs when an eager ([StartupPriority.NORMAL]/[StartupPriority.CRITICAL])
+     * initializer depends — directly or transitively — on a [StartupPriority.DEFERRED] one. Deferring
+     * that dependency past the first frame would strand the eager dependent, so its EFFECTIVE priority
+     * is clamped **up** to the most-eager (minimum ordinal) declared priority among its transitive
+     * dependents, and a one-time warning is always emitted via `Log.w` (not gated by
+     * `debugLoggingEnabled`, since a priority inversion is a graph misconfiguration developers
+     * must see). A DEFERRED node with no eager dependent keeps its declared priority.
+     *
+     * This is a pure read-only pass: it instantiates each discovered node once (the same reflection
+     * the graph validators already use), builds a reverse-adjacency map (dependency -> dependents),
+     * and runs a visited-guarded DFS over the reverse edges so self- and mutual-dependencies cannot
+     * loop. It launches nothing.
+     *
+     * @param discovered the set of discovered async initializer classes to classify.
+     * @return a map from each discovered class to its effective [StartupPriority].
+     */
+    internal fun computeEffectivePriorities(
+        discovered: Set<Class<out StartupAsyncInitializer<*>>>,
+    ): Map<Class<out StartupAsyncInitializer<*>>, StartupPriority> {
+        if (discovered.isEmpty()) return emptyMap()
+
+        val declared = mutableMapOf<Class<out StartupAsyncInitializer<*>>, StartupPriority>()
+        val dependents = mutableMapOf<Class<out StartupAsyncInitializer<*>>, MutableList<Class<out StartupAsyncInitializer<*>>>>()
+
+        discovered.forEach { cls ->
+            val initializer = cls.getDeclaredConstructor().newInstance() as StartupAsyncInitializer<*>
+            declared[cls] = initializer.priority()
+            initializer.dependencies()
+                .filter { it in discovered }
+                .forEach { dep -> dependents.getOrPut(dep) { mutableListOf() }.add(cls) }
+        }
+
+        val effective = declared.toMutableMap()
+
+        declared.filterValues { it == StartupPriority.DEFERRED }.keys.forEach { deferredNode ->
+            var clampTarget: StartupPriority? = null
+            val visited = mutableSetOf<Class<out StartupAsyncInitializer<*>>>()
+            val stack = ArrayDeque(dependents[deferredNode].orEmpty())
+            while (stack.isNotEmpty()) {
+                val dependent = stack.removeLast()
+                if (!visited.add(dependent)) continue // visited-guard => cycle-safe
+
+                val dependentPriority = declared[dependent] ?: StartupPriority.NORMAL
+                if (dependentPriority != StartupPriority.DEFERRED &&
+                    (clampTarget == null || dependentPriority.ordinal < clampTarget.ordinal)
+                ) {
+                    clampTarget = dependentPriority
+                }
+                dependents[dependent]?.let(stack::addAll)
+            }
+
+            clampTarget?.let { target ->
+                effective[deferredNode] = target
+                warnPriorityInversionOnce(deferredNode, target)
+            }
+        }
+
+        return effective
+    }
+
+    /**
+     * Emits a single priority-inversion warning per startup (per initializer instance). The
+     * warning always surfaces via `Log.w` (not gated by `debugLoggingEnabled`). The
+     * [AtomicBoolean] guard keeps it to one message even when several DEFERRED nodes are clamped.
+     */
+    private fun warnPriorityInversionOnce(
+        node: Class<out StartupAsyncInitializer<*>>,
+        clampedTo: StartupPriority,
+    ) {
+        if (!inversionWarned.compareAndSet(false, true)) return
+
+        Log.w(
+            STARTUP_LOG_TAG,
+            "Detected startup priority inversion: DEFERRED initializer ${node.simpleName} is required " +
+                "by an eager ($clampedTo) initializer, so its effective priority is clamped up to " +
+                "$clampedTo and it will launch eagerly (not after the first frame). Review the " +
+                "dependency graph or the priority() overrides to remove the inversion.",
+        )
+    }
 
     /**
      * Emits a single strict-mode warning per startup when the observed async-concurrency
@@ -712,6 +831,7 @@ class AppStartupInitializer internal constructor(
     }
 
     companion object {
+        private const val STARTUP_LOG_TAG = "StartupLogger"
         private const val KEY_SYNC_INITIALIZER = "sync-initializer"
         private const val KEY_ASYNC_INITIALIZER = "async-initializer"
         private const val SECTION_NAME = "StartupExtension"

@@ -7,6 +7,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+#### Startup priority staggering (defer past the first frame)
+
+- `StartupPriority` — new public enum (`CRITICAL`, `NORMAL`, `DEFERRED`) whose ordinal encodes
+  eagerness (minimum ordinal = most eager). `DEFERRED` is the only value that changes scheduling in
+  this release. `CRITICAL` is reserved for a future strict scheduler and currently behaves
+  **identically to `NORMAL`** (it partitions as eager, does not bypass the concurrency cap, and is
+  not ordered ahead of `NORMAL`).
+- `StartupAsyncInitializer.priority(): StartupPriority` — additive default method returning
+  `StartupPriority.NORMAL`. Same source- and binary-compatible pattern as the `dispatcher()`
+  sentinel, so existing initializers keep their current behaviour with zero changes. Override to
+  `DEFERRED` for work safe to run after the first frame (analytics warmers, prefetchers) so it never
+  competes with UI-critical startup.
+- `FirstFrameSignal` — new public seam (`suspend fun await()`) that resolves when the first frame
+  has been drawn. `DEFERRED` roots suspend on it before their `create()` runs. Core scheduling
+  depends only on this interface and never hardcodes `Choreographer`/`Activity` detection, so a
+  `CompletableDeferred`-backed fake drives deferred scheduling deterministically in tests.
+- Internal Android default first-frame signal, resolved lazily by the scheduler (only when a
+  `DEFERRED` root exists) so the static config never holds a `Context`. It completes on the first
+  activity's first draw and unregisters its lifecycle callback immediately (no `Activity` retained).
+  In headless/no-`Application` processes it never self-completes; the timeout fallback flushes
+  deferred work instead.
+- `AppStartupConfig.firstFrameSignal: FirstFrameSignal?` — optional injectable signal (default
+  `null` = use the internal Android default). Inject a fake to drive deferred scheduling under test.
+- `AppStartupConfig.deferredStartupTimeoutMs: Long` — upper bound (default `5_000L`) the deferred
+  gate waits for the first frame before flushing `DEFERRED` work anyway, guaranteeing headless/no-UI
+  processes still run their deferred initializers. A value `<= 0` makes the gate return immediately
+  (`withTimeoutOrNull(0)`) — a documented escape hatch, not a bug.
+
+### Changed
+
+- `asyncDiscoverAndInitialize` now partitions the roots it launches by **effective** priority: eager
+  (`NORMAL`/`CRITICAL`) roots launch immediately on the critical path via the unchanged
+  `launchStartJob` → `doAsyncInitialize` path, while `DEFERRED` roots launch via a separate gated
+  coroutine that suspends on `withTimeoutOrNull(deferredStartupTimeoutMs) { firstFrameSignal.await() }`
+  before calling the **same untouched** `doAsyncInitialize`. The `doAsyncInitialize` hot path is
+  byte-for-byte unchanged, preserving deps-resolved-before-acquire ordering (no nested permits, no
+  deadlock at cap `1`), the global `Semaphore` cap, and dispatcher precedence. The deferred gate
+  holds **no** concurrency permit while suspended on the signal.
+- `awaitAllStartJobs()` (and the `timeoutMs` overload) **excludes** `DEFERRED` jobs: they are
+  tracked in a separate engine list, so the critical-path await returns without waiting for
+  deferred work — it cannot block or deadlock at cap `1` or under `runBlocking`.
+- Priority-inversion handling: when an eager (`NORMAL`/`CRITICAL`) initializer depends — directly or
+  transitively — on a `DEFERRED` one, the library clamps the `DEFERRED` dependency's **effective**
+  priority up to its most-eager dependent (so it launches eagerly, not after the frame) and logs a
+  single warning per startup. It never rejects a valid graph at validation. The warning is routed
+  through `StartupExtensionLogger`, so it is only visible when `debugLoggingEnabled` is on.
+- Initializers with no `priority()` override behave **identically to 2.1.0** — this change is fully
+  additive and backward-compatible.
+
+---
+
 ## [2.1.0] — 2026-07-04
 
 ### Added
