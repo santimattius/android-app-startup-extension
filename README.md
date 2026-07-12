@@ -14,7 +14,8 @@ startup time without blocking the main thread.
   the main thread.
 - **Startup State Lifecycle:** Observe the startup lifecycle (`IDLE → IN_PROGRESS → COMPLETED / ERROR`) via a `StateFlow`.
 - **Timeout Support:** Await all startup jobs with a configurable timeout.
-- **Metrics Flow:** Per-initializer timing and outcome data exposed as a hot `SharedFlow` — late collectors receive the full replay of all startup metrics.
+- **Metrics Flow:** Per-initializer timing, outcome, and concurrency/dispatcher data exposed as a hot `SharedFlow` — late collectors receive the full replay of all startup metrics.
+- **Coroutine Storm Mitigation:** Optional cap on concurrent async `create()` executions (`maxConcurrentAsyncInitializers`) backed by a deadlock-safe `Semaphore`, plus a library-wide default dispatcher (`defaultAsyncDispatcher`) and a strict-mode warning when concurrency exceeds a configurable threshold.
 - **Cancellation Reporting:** `StartupMetric.wasCancelled` distinguishes structured cancellations from real failures.
 - **Transient Initializers:** Override `retainAfterStartup()` to `false` to release the initializer's result from the registry after startup, enabling GC of side-effect-only components.
 - **Configurable Sync Ordering:** Choose between `SyncOrderingStrategy.Lazy` (default DFS) or `Topological` (Kahn's algorithm with upfront cycle detection before any `create()` runs).
@@ -80,7 +81,9 @@ class AsyncTestInitializer : StartupAsyncInitializer<Unit> {
 
 #### Per-initializer Dispatcher
 
-Override `dispatcher()` to pin the initializer's `create()` to a specific thread pool. Defaults to `Dispatchers.Default`.
+Override `dispatcher()` to pin the initializer's `create()` to a specific thread pool. `dispatcher()` returns
+`CoroutineDispatcher?` — an unoverridden (or `null`-returning) initializer falls back to
+`AppStartupConfig.defaultAsyncDispatcher` (itself `Dispatchers.Default` unless configured).
 
 ```kotlin
 class DatabaseInitializer : StartupAsyncInitializer<Unit> {
@@ -221,7 +224,9 @@ lifecycleScope.launch {
             "Metrics",
             "${metric.initializerName} took ${metric.durationMs}ms " +
             "(async=${metric.isAsync}, success=${metric.success}, " +
-            "cancelled=${metric.wasCancelled})"
+            "cancelled=${metric.wasCancelled}, dispatcher=${metric.dispatcherName}, " +
+            "thread=${metric.threadName}, concurrentActive=${metric.concurrentActiveCount}, " +
+            "queueDelayMs=${metric.queueDelayMs})"
         )
     }
 }
@@ -236,6 +241,10 @@ lifecycleScope.launch {
 | `isAsync` | `true` for async initializers, `false` for sync |
 | `success` | `true` if `create()` completed without throwing |
 | `wasCancelled` | `true` if interrupted by structured cancellation (not a real failure) |
+| `dispatcherName` | Dispatcher `create()` actually ran on (empty for sync) |
+| `threadName` | Thread `create()` actually ran on (empty for sync) |
+| `concurrentActiveCount` | Snapshot of how many async initializers were executing `create()` when this one started (always `0` for sync) |
+| `queueDelayMs` | Time from becoming ready to run to actually starting — concurrency-cap wait + dispatcher scheduling latency; the primary "coroutine storm" signal (always `0` for sync) |
 
 > **Note:** Collect from a lifecycle-aware scope (e.g. `lifecycleScope`) to avoid retaining
 > UI references in the singleton.
@@ -294,6 +303,9 @@ class MyApplication : Application() {
 | `strictModeCheckEnabled` | `Boolean` | `false` | Wraps each sync `create()` with a `StrictMode.ThreadPolicy` that surfaces blocking I/O violations in logcat |
 | `syncOrderingStrategy` | `SyncOrderingStrategy` | `Lazy` | Controls how sync initializers are ordered before execution |
 | `asyncInitializerStrategy` | `AsyncInitializerStrategy` | `Concurrent` | Controls how async initializers are validated and launched |
+| `maxConcurrentAsyncInitializers` | `Int?` | `null` | Caps how many async `create()` bodies may run concurrently. `null` or values `<= 0` mean unbounded |
+| `defaultAsyncDispatcher` | `CoroutineDispatcher` | `Dispatchers.Default` | Library-wide default dispatcher for async initializers that don't override `dispatcher()` |
+| `strictModeConcurrencyThreshold` | `Int` | `Runtime.getRuntime().availableProcessors()` | Concurrency level above which strict mode logs a warning (only when `strictModeCheckEnabled` is on) |
 
 #### `SyncOrderingStrategy`
 
@@ -308,6 +320,29 @@ class MyApplication : Application() {
 |---|---|
 | `Concurrent` *(default)* | One coroutine launched per discovered async initializer. Cycle detected lazily inside each coroutine's DFS chain. |
 | `Validated` | Builds the async-to-async dependency graph (from `dependencies()` only — `syncDependencies()` are already resolved by the time async initializers start) before launching any coroutine. Cycles detected upfront. Only **root** nodes — those no other async initializer depends on — receive an explicit coroutine; their dependencies are resolved recursively inside that coroutine, reducing total coroutine count for chained initializers. |
+
+#### Coroutine Storm Mitigation
+
+Launching every async initializer at once on `Dispatchers.Default` can flood the shared thread pool
+("coroutine storm"), starving other work at startup. `maxConcurrentAsyncInitializers` caps how many
+`create()` bodies run at the same time via a `Semaphore`, acquired only *after* an initializer's
+dependencies have already completed — so a parent never holds a permit while waiting on a child,
+avoiding deadlock even at a cap of `1`.
+
+```kotlin
+AppStartupInitializer.configure {
+    maxConcurrentAsyncInitializers = 4
+    defaultAsyncDispatcher = Dispatchers.IO
+    strictModeCheckEnabled = BuildConfig.DEBUG
+    strictModeConcurrencyThreshold = 4
+}
+```
+
+When `strictModeCheckEnabled` is on, the library logs a single warning per startup if the observed
+`concurrentActiveCount` ever exceeds `strictModeConcurrencyThreshold`, reporting the peak, the
+threshold, the dispatcher involved, and remediation guidance. Use the `queueDelayMs` and
+`concurrentActiveCount` fields on `StartupMetric` (see [Metrics](#metrics)) to measure the storm
+before deciding on a cap.
 
 ### StrictMode Integration
 
