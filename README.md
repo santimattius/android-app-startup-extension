@@ -16,6 +16,7 @@ startup time without blocking the main thread.
 - **Timeout Support:** Await all startup jobs with a configurable timeout.
 - **Metrics Flow:** Per-initializer timing, outcome, and concurrency/dispatcher data exposed as a hot `SharedFlow` — late collectors receive the full replay of all startup metrics.
 - **Coroutine Storm Mitigation:** Optional cap on concurrent async `create()` executions (`maxConcurrentAsyncInitializers`) backed by a deadlock-safe `Semaphore`, plus a library-wide default dispatcher (`defaultAsyncDispatcher`) and a strict-mode warning when concurrency exceeds a configurable threshold.
+- **Startup Priority Staggering:** Mark an async initializer `DEFERRED` via `priority()` to launch it only after the first frame is drawn (or a timeout fallback), keeping non-critical work off the startup critical path.
 - **Cancellation Reporting:** `StartupMetric.wasCancelled` distinguishes structured cancellations from real failures.
 - **Transient Initializers:** Override `retainAfterStartup()` to `false` to release the initializer's result from the registry after startup, enabling GC of side-effect-only components.
 - **Configurable Sync Ordering:** Choose between `SyncOrderingStrategy.Lazy` (default DFS) or `Topological` (Kahn's algorithm with upfront cycle detection before any `create()` runs).
@@ -108,6 +109,27 @@ class AnalyticsInitializer : StartupAsyncInitializer<Unit> {
     }
 }
 ```
+
+#### Priority Staggering (Deferred Initializers)
+
+Override `priority()` to control **when** an async initializer launches. The default,
+`StartupPriority.NORMAL`, launches immediately on the eager critical path — unchanged for every
+existing initializer. Return `StartupPriority.DEFERRED` for work that is safe to run **after the
+first frame is drawn** (analytics warmers, prefetchers) so it never competes with UI-critical startup.
+
+```kotlin
+class AnalyticsWarmupInitializer : StartupAsyncInitializer<Unit> {
+    override fun priority() = StartupPriority.DEFERRED
+
+    override suspend fun create(context: Context) {
+        // Runs only after the first frame is drawn (or the deferred timeout elapses)
+    }
+}
+```
+
+> **Note:** `StartupPriority.CRITICAL` is reserved for a future strict scheduler — in this release it
+> behaves identically to `NORMAL`. `awaitAllStartJobs()` excludes `DEFERRED` jobs, so it returns
+> without waiting for deferred work to finish (see [Startup Priority Staggering](#startup-priority-staggering)).
 
 ### Registering in `AndroidManifest.xml`
 
@@ -306,6 +328,8 @@ class MyApplication : Application() {
 | `maxConcurrentAsyncInitializers` | `Int?` | `null` | Caps how many async `create()` bodies may run concurrently. `null` or values `<= 0` mean unbounded |
 | `defaultAsyncDispatcher` | `CoroutineDispatcher` | `Dispatchers.Default` | Library-wide default dispatcher for async initializers that don't override `dispatcher()` |
 | `strictModeConcurrencyThreshold` | `Int` | `Runtime.getRuntime().availableProcessors()` | Concurrency level above which strict mode logs a warning (only when `strictModeCheckEnabled` is on) |
+| `firstFrameSignal` | `FirstFrameSignal?` | `null` | Optional injectable signal gating `DEFERRED` initializers. `null` uses the internal Android first-draw default; inject a fake to drive deferred scheduling under test |
+| `deferredStartupTimeoutMs` | `Long` | `5_000L` | Upper bound the deferred gate waits for the first frame before flushing `DEFERRED` work anyway (headless/no-UI fallback). Values `<= 0` flush immediately |
 
 #### `SyncOrderingStrategy`
 
@@ -343,6 +367,39 @@ When `strictModeCheckEnabled` is on, the library logs a single warning per start
 threshold, the dispatcher involved, and remediation guidance. Use the `queueDelayMs` and
 `concurrentActiveCount` fields on `StartupMetric` (see [Metrics](#metrics)) to measure the storm
 before deciding on a cap.
+
+#### Startup Priority Staggering
+
+`StartupPriority` controls **when** an async initializer's `create()` is launched:
+
+| Priority | Ordinal | Meaning |
+|---|---|---|
+| `CRITICAL` | 0 | Most eager. In this release behaves identically to `NORMAL`; reserved for a future strict scheduler. |
+| `NORMAL` *(default)* | 1 | Launched immediately on the eager critical path. |
+| `DEFERRED` | 2 | Launched only after the first frame is drawn (or `deferredStartupTimeoutMs` elapses). |
+
+```kotlin
+AppStartupInitializer.configure {
+    deferredStartupTimeoutMs = 5_000L
+    // firstFrameSignal = MyFirstFrameSignal() // optional custom trigger (default: Android first-draw)
+}
+
+class AnalyticsWarmupInitializer : StartupAsyncInitializer<Unit> {
+    override fun priority() = StartupPriority.DEFERRED
+
+    override suspend fun create(context: Context) {
+        // Never competes with UI-critical startup for the first frame
+    }
+}
+```
+
+**Priority inversion:** if an eager (`NORMAL`/`CRITICAL`) initializer depends — directly or
+transitively — on a `DEFERRED` one, the library clamps the `DEFERRED` dependency's effective priority
+up to its most-eager dependent (so it launches eagerly instead of stalling the dependent past the
+first frame) and logs a single warning per startup.
+
+**`awaitAllStartJobs()` excludes `DEFERRED` jobs** — the critical-path await returns without waiting
+for deferred work, so it cannot block on cap `1` or under `runBlocking`.
 
 ### StrictMode Integration
 
