@@ -9,6 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-07-14
+
 ### Added
 
 #### Startup priority staggering (defer past the first frame)
@@ -273,7 +275,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Published to Maven Central as
   `io.github.santimattius.android:app-startup-extension`.
 
-[Unreleased]: https://github.com/santimattius/android-app-startup-extension/compare/2.1.0...HEAD
+[Unreleased]: https://github.com/santimattius/android-app-startup-extension/compare/2.2.0...HEAD
+[2.2.0]: https://github.com/santimattius/android-app-startup-extension/compare/2.1.0...2.2.0
 [2.1.0]: https://github.com/santimattius/android-app-startup-extension/compare/2.0.0...2.1.0
 [2.0.0]: https://github.com/santimattius/android-app-startup-extension/compare/1.1.0...2.0.0
 [1.1.0]: https://github.com/santimattius/android-app-startup-extension/compare/1.0.0...1.1.0
