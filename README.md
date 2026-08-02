@@ -1,6 +1,8 @@
 ![architecture - Startup Extension Initializer(1)](https://github.com/user-attachments/assets/9d44a786-7638-44de-952a-60059984abda)
 
 [![Latest Release](https://maven-badges.sml.io/sonatype-central/io.github.santimattius.android/app-startup-extension/badge.svg?subject=Latest%20Release&color=blue)](https://maven-badges.sml.io/sonatype-central/io.github.santimattius.android/app-startup-extension/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+
 # App Startup Extension
 
 App Startup Extension is a library based on AndroidX App Startup that optimizes component
