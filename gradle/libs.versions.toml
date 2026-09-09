@@ -1,5 +1,5 @@
 [versions]
-agp = "9.3.1"
+agp = "9.3.2"
 kotlin = "2.4.10"
 mavenPublish = "0.37.0"
 
@@ -7,7 +7,7 @@ coreKtx = "1.19.0"
 lifecycleRuntimeKtx = "2.11.0"
 activityCompose = "1.13.0"
 composeBom = "2026.08.00"
-appcompat = "1.7.1"
+appcompat = "1.8.0"
 material = "1.14.0"
 
 junit = "4.13.2"
