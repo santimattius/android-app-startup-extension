@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -120,6 +121,78 @@ class StartupMetricsTest {
         assertTrue(metrics[1].isAsync)
     }
 
+    // ── Identity, timing and error fields ────────────────────────────────────
+
+    @Test
+    fun `sync metric carries fqn, consistent timestamps and no error`() {
+        initializer.doInitialize<String>(SimpleSyncInitializer::class.java)
+
+        with(initializer.metricsFlow.replayCache.single()) {
+            assertEquals(SimpleSyncInitializer::class.java.name, initializerFqn)
+            assertTrue(startTimestampMs <= endTimestampMs)
+            assertEquals(durationMs, endTimestampMs - startTimestampMs)
+            assertTrue(processStartOffsetMs >= 0)
+            assertEquals(StartupPriority.NORMAL, priority)
+            assertNull(errorType)
+            assertNull(errorMessage)
+        }
+    }
+
+    @Test
+    fun `async DEFERRED metric carries priority, fqn and timestamps consistent with duration`() = runTest {
+        initializer.doInitialize<String>(DeferredAsyncInitializer::class.java)
+
+        with(initializer.metricsFlow.replayCache.single()) {
+            assertEquals(StartupPriority.DEFERRED, priority)
+            assertEquals(DeferredAsyncInitializer::class.java.name, initializerFqn)
+            assertTrue(startTimestampMs <= endTimestampMs)
+            assertEquals(durationMs, endTimestampMs - startTimestampMs)
+            assertTrue(processStartOffsetMs >= 0)
+            assertNull(errorType)
+        }
+    }
+
+    @Test
+    fun `async failure populates error type and message`() = runTest {
+        runCatching { initializer.doInitialize<String>(FailingAsyncInitializer::class.java) }
+
+        with(initializer.metricsFlow.replayCache.single()) {
+            assertFalse(success)
+            assertEquals("java.lang.RuntimeException", errorType)
+            assertEquals("intentional failure", errorMessage)
+        }
+    }
+
+    @Test
+    fun `sync failure populates error type and message`() {
+        runCatching { initializer.doInitialize<String>(FailingSyncInitializer::class.java) }
+
+        with(initializer.metricsFlow.replayCache.single()) {
+            assertFalse(success)
+            assertEquals("java.lang.IllegalStateException", errorType)
+            assertEquals("sync boom", errorMessage)
+            assertEquals(FailingSyncInitializer::class.java.name, initializerFqn)
+        }
+    }
+
+    @Test
+    fun `cancellation is not reported as error info`() {
+        runBlocking {
+            val job = launch {
+                runCatching { initializer.doInitialize<String>(HangingAsyncInitializer::class.java) }
+            }
+            yield()
+            job.cancel()
+            job.join()
+        }
+
+        with(initializer.metricsFlow.replayCache.single()) {
+            assertTrue(wasCancelled)
+            assertNull(errorType)
+            assertNull(errorMessage)
+        }
+    }
+
     // ── Fixtures ──────────────────────────────────────────────────────────────
 
     private class SimpleSyncInitializer : StartupSyncInitializer<String> {
@@ -128,6 +201,15 @@ class StartupMetricsTest {
 
     private class SimpleAsyncInitializer : StartupAsyncInitializer<String> {
         override suspend fun create(context: Context) = "async-result"
+    }
+
+    private class DeferredAsyncInitializer : StartupAsyncInitializer<String> {
+        override fun priority() = StartupPriority.DEFERRED
+        override suspend fun create(context: Context) = "deferred-result"
+    }
+
+    private class FailingSyncInitializer : StartupSyncInitializer<String> {
+        override fun create(context: Context): String = throw IllegalStateException("sync boom")
     }
 
     private class FailingAsyncInitializer : StartupAsyncInitializer<String> {

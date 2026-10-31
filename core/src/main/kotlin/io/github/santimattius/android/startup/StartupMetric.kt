@@ -20,8 +20,21 @@ package io.github.santimattius.android.startup
  * @property queueDelayMs Monotonic milliseconds elapsed between the initializer becoming ready to run
  *   and actually starting execution (semaphore wait + dispatcher scheduling latency). Always `0` for
  *   sync initializers.
+ * @property startTimestampMs `SystemClock.uptimeMillis()` when `create()` started. Same clock as
+ *   [Process.getStartUptimeMillis][android.os.Process.getStartUptimeMillis]. `0` when unknown.
+ * @property endTimestampMs [startTimestampMs] + [durationMs] (derived, so the three are always
+ *   consistent). `0` when unknown.
+ * @property processStartOffsetMs Milliseconds from process start to [startTimestampMs]; useful to
+ *   place the initializer on the process timeline. Never negative.
+ * @property priority Declared [StartupPriority] of the initializer. Sync initializers have no
+ *   priority and report [StartupPriority.NORMAL].
+ * @property initializerFqn Fully-qualified class name; unlike [initializerName] it disambiguates
+ *   same-named classes and matches the trace section names.
+ * @property errorType Class name of the throwable that failed `create()`, `null` on success and on
+ *   cancellation. Only strings are kept so a metric never retains a stack trace or captured state.
+ * @property errorMessage [Throwable.message] of the failure, `null` when absent or on success.
  */
-data class StartupMetric(
+data class StartupMetric @JvmOverloads constructor(
     val initializerName: String,
     val durationMs: Long,
     val isAsync: Boolean,
@@ -31,4 +44,11 @@ data class StartupMetric(
     val threadName: String = "",
     val concurrentActiveCount: Int = 0,
     val queueDelayMs: Long = 0L,
+    val startTimestampMs: Long = 0L,
+    val endTimestampMs: Long = 0L,
+    val processStartOffsetMs: Long = 0L,
+    val priority: StartupPriority = StartupPriority.NORMAL,
+    val initializerFqn: String = "",
+    val errorType: String? = null,
+    val errorMessage: String? = null,
 )

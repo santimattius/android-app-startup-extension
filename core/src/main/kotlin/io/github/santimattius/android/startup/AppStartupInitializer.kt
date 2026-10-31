@@ -6,7 +6,9 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.PackageManager.GET_META_DATA
 import android.os.Bundle
+import android.os.Process
 import android.os.StrictMode
+import android.os.SystemClock
 import android.os.Trace
 import android.util.Log
 import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
@@ -313,7 +315,9 @@ class AppStartupInitializer internal constructor(
 
                     StartupExtensionLogger.info("Initializing ${component.name}")
                     val startNs = System.nanoTime()
+                    val startUptimeMs = SystemClock.uptimeMillis()
                     var success = false
+                    var failure: Throwable? = null
                     // Install a StrictMode policy that detects accidental I/O or disk
                     // access inside create(). Only active when the caller opts in via
                     // enableStrictModeCheck(true). The original policy is restored after
@@ -335,14 +339,24 @@ class AppStartupInitializer internal constructor(
                         success = true
                         StartupExtensionLogger.info("Initialized ${component.name}")
                         result
+                    } catch (t: Throwable) {
+                        failure = t
+                        throw t
                     } finally {
                         savedPolicy?.let { StrictMode.setThreadPolicy(it) }
+                        val durationMs = (System.nanoTime() - startNs) / 1_000_000L
                         metricsBus.publish(
                             StartupMetric(
                                 initializerName = component.simpleName,
-                                durationMs = (System.nanoTime() - startNs) / 1_000_000L,
+                                durationMs = durationMs,
                                 isAsync = false,
                                 success = success,
+                                startTimestampMs = startUptimeMs,
+                                endTimestampMs = startUptimeMs + durationMs,
+                                processStartOffsetMs = processStartOffsetMs(startUptimeMs),
+                                initializerFqn = component.name,
+                                errorType = failure?.javaClass?.name,
+                                errorMessage = failure?.message,
                             )
                         )
                     }
@@ -426,11 +440,14 @@ class AppStartupInitializer internal constructor(
 
                     var success = false
                     var wasCancelled = false
+                    var failure: Throwable? = null
                     var startedNs = requestedNs
+                    var startedUptimeMs = 0L
                     var executionThreadName = ""
                     try {
                         val result = withContext(effectiveDispatcher) {
                             startedNs = System.nanoTime()
+                            startedUptimeMs = SystemClock.uptimeMillis()
                             executionThreadName = Thread.currentThread().name
                             tracer.asyncSection({ StartupTraceNames.of("create", component.name) }) {
                                 asyncInitializer.create(applicationContext)
@@ -442,13 +459,17 @@ class AppStartupInitializer internal constructor(
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         wasCancelled = true
                         throw e
+                    } catch (t: Throwable) {
+                        failure = t
+                        throw t
                     } finally {
                         coroutinesEngine.exitActive()
                         coroutinesEngine.releaseAsyncPermit()
+                        val durationMs = (System.nanoTime() - startedNs) / 1_000_000L
                         metricsBus.publish(
                             StartupMetric(
                                 initializerName = component.simpleName,
-                                durationMs = (System.nanoTime() - startedNs) / 1_000_000L,
+                                durationMs = durationMs,
                                 isAsync = true,
                                 success = success,
                                 wasCancelled = wasCancelled,
@@ -456,6 +477,13 @@ class AppStartupInitializer internal constructor(
                                 threadName = executionThreadName,
                                 concurrentActiveCount = activeSnapshot,
                                 queueDelayMs = (startedNs - requestedNs) / 1_000_000L,
+                                startTimestampMs = startedUptimeMs,
+                                endTimestampMs = startedUptimeMs + durationMs,
+                                processStartOffsetMs = processStartOffsetMs(startedUptimeMs),
+                                priority = asyncInitializer.priority(),
+                                initializerFqn = component.name,
+                                errorType = failure?.javaClass?.name,
+                                errorMessage = failure?.message,
                             )
                         )
                     }
@@ -809,6 +837,10 @@ class AppStartupInitializer internal constructor(
                 "dependency graph or the priority() overrides to remove the inversion.",
         )
     }
+
+    /** Milliseconds from process start to [uptimeMs] (same `uptimeMillis` clock); never negative. */
+    private fun processStartOffsetMs(uptimeMs: Long): Long =
+        (uptimeMs - Process.getStartUptimeMillis()).coerceAtLeast(0L)
 
     /**
      * Emits a single strict-mode warning per startup when the observed async-concurrency
