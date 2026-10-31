@@ -1,3 +1,5 @@
+@file:OptIn(org.jetbrains.kotlin.gradle.dsl.abi.ExperimentalAbiValidation::class)
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
@@ -13,6 +15,20 @@ val libraryVersion: String by project
 
 kotlin {
     jvmToolchain(17)
+    // Public API guard: dump lives in core/api/core.api. Internal types are excluded by the tool.
+    abiValidation { }
+}
+
+// Tool-agnostic aliases so CI and docs do not depend on the underlying ABI tool's task names.
+tasks.register("apiCheck") {
+    group = "verification"
+    description = "Fails if the public API differs from the committed dump in core/api."
+    dependsOn("checkKotlinAbi")
+}
+tasks.register("apiDump") {
+    group = "verification"
+    description = "Regenerates the committed public API dump in core/api."
+    dependsOn("updateKotlinAbi")
 }
 
 android {
