@@ -13,7 +13,12 @@ import io.github.santimattius.android.startup.initializer.StartupAsyncInitialize
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -41,6 +46,9 @@ class AsyncTraceSectionsTest {
     @Before
     fun setUp() {
         gate = CountDownLatch(1)
+        hangingEntered = CountDownLatch(1)
+        siblingEntered = CountDownLatch(1)
+        hangingJob = null
         every { context.applicationContext } returns context
         every { context.classLoader } returns javaClass.classLoader
         every { context.packageName } returns "io.github.santimattius.test"
@@ -131,6 +139,7 @@ class AsyncTraceSectionsTest {
         while (tracer.events.count { it is RecordingStartupTracer.Event.AsyncBegin && it.name.startsWith("Startup::permitWait::") } < 2 &&
             System.nanoTime() < deadline
         ) Thread.sleep(5)
+        Thread.sleep(100) // hold the permit so the second initializer's wait is clearly non-zero
         gate.countDown()
         runBlocking { initializer.awaitAllStartJobs() }
 
@@ -140,6 +149,52 @@ class AsyncTraceSectionsTest {
         assertTrue(tracer.asyncEndIndex(phase("permitWait", first)) < tracer.asyncBeginIndex(phase("create", first)))
         assertTrue(tracer.asyncEndIndex(phase("permitWait", second)) < tracer.asyncBeginIndex(phase("create", second)))
         assertTrue(tracer.asyncEndIndex(phase("permitWait", second)) > tracer.asyncEndIndex(phase("create", first)))
+        // S2: the first initializer is non-contended (~zero wait); the second really waited.
+        assertTrue(tracer.asyncDurationMs(phase("permitWait", first)) < 50)
+        assertTrue(tracer.asyncDurationMs(phase("permitWait", second)) >= 80)
+        assertTrue(tracer.asyncBalanced())
+    }
+
+    @Test
+    fun `externally cancelling the parent job while suspended in create leaves sections balanced`() {
+        val parent = Job()
+        val scope = CoroutineScope(parent + Dispatchers.IO)
+        val job = scope.launch {
+            AppStartupInitializer(context, Dispatchers.IO, tracer).doInitialize<String>(Hanging::class.java)
+        }
+        assertTrue(hangingEntered.await(5, TimeUnit.SECONDS))
+
+        parent.cancel() // external cancellation of the owning scope
+        runBlocking { job.join() }
+
+        assertTrue(job.isCancelled)
+        assertTrue(tracer.asyncBeginIndex(phase("create", Hanging::class.java)) >= 0)
+        assertTrue(tracer.asyncEndIndex(phase("create", Hanging::class.java)) >= 0)
+        assertTrue(tracer.asyncEndIndex(node(Hanging::class.java)) >= 0)
+        assertTrue(tracer.asyncBalanced())
+    }
+
+    @Test
+    fun `cancelling one start job externally keeps sections balanced and a sibling completes`() {
+        val initializer = AppStartupInitializer(context, Dispatchers.IO, tracer)
+        stubAsyncManifest(Hanging::class.java, Sibling::class.java)
+
+        initializer.discoverAndInitialize(InitializationProvider::class.java)
+        assertTrue(hangingEntered.await(5, TimeUnit.SECONDS))
+        assertTrue(siblingEntered.await(5, TimeUnit.SECONDS))
+        val victim = initializer.coroutinesEngine.startJobs.first { job ->
+            job.children.any { it === hangingJob }
+        }
+        val survivor = initializer.coroutinesEngine.startJobs.first { it !== victim }
+
+        victim.cancel()
+        runBlocking { victim.join() }
+        gate.countDown() // let the sibling finish after the cancellation
+        runBlocking { survivor.join() }
+
+        assertTrue(victim.isCancelled)
+        assertTrue(survivor.isCompleted && !survivor.isCancelled)
+        assertTrue(tracer.asyncEndIndex(phase("create", Sibling::class.java)) >= 0)
         assertTrue(tracer.asyncBalanced())
     }
 
@@ -180,6 +235,31 @@ class AsyncTraceSectionsTest {
     companion object {
         @Volatile
         var gate = CountDownLatch(1)
+
+        @Volatile
+        var hangingEntered = CountDownLatch(1)
+
+        @Volatile
+        var siblingEntered = CountDownLatch(1)
+
+        @Volatile
+        var hangingJob: Job? = null
+    }
+
+    class Hanging : StartupAsyncInitializer<String> {
+        override suspend fun create(context: Context): String {
+            hangingJob = currentCoroutineContext()[Job]
+            hangingEntered.countDown()
+            awaitCancellation()
+        }
+    }
+
+    class Sibling : StartupAsyncInitializer<String> {
+        override suspend fun create(context: Context): String {
+            siblingEntered.countDown()
+            gate.await(5, TimeUnit.SECONDS)
+            return "sibling"
+        }
     }
 
     class Child : StartupAsyncInitializer<String> {

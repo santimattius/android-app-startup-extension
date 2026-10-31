@@ -12,8 +12,8 @@ internal class RecordingStartupTracer(
         val name: String
         data class Begin(override val name: String, val thread: String) : Event
         data class End(override val name: String, val thread: String) : Event
-        data class AsyncBegin(override val name: String, val cookie: Int) : Event
-        data class AsyncEnd(override val name: String, val cookie: Int) : Event
+        data class AsyncBegin(override val name: String, val cookie: Int, val timeNs: Long = System.nanoTime()) : Event
+        data class AsyncEnd(override val name: String, val cookie: Int, val timeNs: Long = System.nanoTime()) : Event
         data class Counter(override val name: String, val value: Long) : Event
         data class Marker(override val name: String) : Event
     }
@@ -61,6 +61,13 @@ internal class RecordingStartupTracer(
     fun asyncEndIndex(name: String): Int = indexOf { it is Event.AsyncEnd && it.name == name }
     fun syncBeginIndex(name: String): Int = indexOf { it is Event.Begin && it.name == name }
     fun syncEndIndex(name: String): Int = indexOf { it is Event.End && it.name == name }
+
+    /** Wall time between the first begin and first end of the named async section, in ms; -1 if absent. */
+    fun asyncDurationMs(name: String): Long {
+        val begin = events.filterIsInstance<Event.AsyncBegin>().firstOrNull { it.name == name } ?: return -1
+        val end = events.filterIsInstance<Event.AsyncEnd>().firstOrNull { it.name == name } ?: return -1
+        return (end.timeNs - begin.timeNs) / 1_000_000L
+    }
 
     /** True when every async begin has exactly one end with the same name and cookie, and vice versa. */
     fun asyncBalanced(): Boolean {

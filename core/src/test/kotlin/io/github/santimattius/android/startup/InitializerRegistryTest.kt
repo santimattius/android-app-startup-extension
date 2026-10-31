@@ -22,6 +22,9 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Spec: startup-observability "Single instantiation per startup" (design D3). */
@@ -56,6 +59,30 @@ class InitializerRegistryTest {
         assertSame(peeked, registry.take(Counted::class.java))
         assertNotSame(peeked, registry.take(Counted::class.java))
         assertEquals(2, constructed[Counted::class.java.name]?.get())
+    }
+
+    @Test
+    fun `concurrent peeks of the same class construct exactly one instance`() {
+        val threads = 16
+        repeat(5) {
+            constructed.clear()
+            val registry = InitializerRegistry()
+            val barrier = CyclicBarrier(threads)
+            val pool = Executors.newFixedThreadPool(threads)
+            try {
+                val results = (1..threads).map {
+                    pool.submit<Any> {
+                        barrier.await()
+                        registry.peek(SlowCounted::class.java)
+                    }
+                }.map { it.get(10, TimeUnit.SECONDS) }
+
+                assertEquals(1, constructed[SlowCounted::class.java.name]?.get())
+                assertEquals(1, results.map { System.identityHashCode(it) }.toSet().size)
+            } finally {
+                pool.shutdownNow()
+            }
+        }
     }
 
     @Test
@@ -110,6 +137,14 @@ class InitializerRegistryTest {
 
     class Counted {
         init { count(javaClass) }
+    }
+
+    class SlowCounted {
+        // Widens the check-then-act window so a non-atomic peek reliably double-constructs.
+        init {
+            count(javaClass)
+            Thread.sleep(20)
+        }
     }
 
     class AsyncBase : StartupAsyncInitializer<String> {
