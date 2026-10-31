@@ -71,14 +71,16 @@ class AppStartupInitializer internal constructor(
         cap = config.maxConcurrentAsyncInitializers,
     )
 
-    private val metricsBus = StartupMetricsBus()
+    private val metricsBus = StartupMetricsBus(config.metricsReplayCapacity)
 
     /**
      * Hot [SharedFlow] that emits a [StartupMetric] after each initializer completes,
      * whether it succeeds or throws.
      *
-     * All emitted values are replayed to late collectors: a collector joining after startup
-     * finishes will still receive the full set of metrics from the startup sequence.
+     * Late collectors get a bounded replay: a collector joining after startup finishes receives the
+     * most recent [AppStartupConfig.metricsReplayCapacity] (default 256) metrics in emission order,
+     * i.e. the full startup unless more initializers than that ran. Beyond the bound the oldest
+     * metrics are dropped first and emitters never suspend.
      *
      * **Thread of emission:** metrics are emitted from the initializer's own thread —
      * the Main Thread for sync initializers, and the initializer's `dispatcher()` for async ones.
