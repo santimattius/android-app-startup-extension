@@ -18,11 +18,26 @@ internal object StartupExtensionLogger {
         delegate = if (enabled) AndroidLogger else NoOpLogger
     }
 
-    fun info(message: String) = delegate.info(message)
+    // The message is built lazily: when debug logging is off the lambda is never invoked, so the
+    // startup hot path allocates no string templates. `inline` also removes the lambda object.
+    inline fun info(message: () -> String) {
+        if (isDebugEnabled) writeInfo(message())
+    }
 
-    fun warning(message: String) = delegate.warning(message)
+    inline fun warning(message: () -> String) {
+        if (isDebugEnabled) writeWarning(message())
+    }
 
-    fun error(message: String, throwable: Throwable) = delegate.error(message, throwable)
+    inline fun error(message: () -> String, throwable: Throwable) {
+        if (isDebugEnabled) writeError(message(), throwable)
+    }
+
+    // Not private: they are called from the inline functions above.
+    fun writeInfo(message: String) = delegate.info(message)
+
+    fun writeWarning(message: String) = delegate.warning(message)
+
+    fun writeError(message: String, throwable: Throwable) = delegate.error(message, throwable)
 
     private interface Logger {
         fun info(message: String)

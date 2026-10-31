@@ -30,10 +30,10 @@ internal class StartupMetricsBus(
     fun publish(metric: StartupMetric) {
         _flow.tryEmit(metric)
         if (published.incrementAndGet() == capacity + 1) {
-            StartupExtensionLogger.warning(
+            StartupExtensionLogger.warning {
                 "Metrics replay is bounded to $capacity; the oldest metrics are now dropped for late " +
                     "collectors. Raise AppStartupConfig.metricsReplayCapacity to keep more."
-            )
+            }
         }
     }
 }
