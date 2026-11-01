@@ -2,6 +2,7 @@ package io.github.santimattius.android.startup.dispatcher
 
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -13,6 +14,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.EmptyCoroutineContext
 
@@ -114,11 +116,94 @@ class InstrumentedDispatcherTest {
         assertEquals("Executors\$FinalizableDelegatedExecutorService", other.label)
     }
 
+    @OptIn(InternalCoroutinesApi::class)
     @Test
-    fun `wrapping never touches global dispatchers`() {
+    fun `dispatchYield is delegated to dispatchYield and counted and measured`() {
+        val clockNs = AtomicLong(0)
+        val yielded = ArrayDeque<Runnable>()
+        var plainDispatches = 0
+        val recording = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                plainDispatches++
+            }
+
+            @InternalCoroutinesApi
+            override fun dispatchYield(context: CoroutineContext, block: Runnable) {
+                yielded.addLast(block)
+            }
+        }
+        val dispatcher = InstrumentedDispatcher(recording, "recording", nanoTime = clockNs::get)
+        var ran = false
+
+        dispatcher.dispatchYield(EmptyCoroutineContext) { ran = true }
+        clockNs.addAndGet(3_000_000L)
+        assertEquals(1, yielded.size)
+        yielded.removeFirst().run()
+
+        assertTrue(ran)
+        assertEquals("yield must not fall back to dispatch()", 0, plainDispatches)
+        assertEquals(1L, dispatcher.snapshot().totalDispatched)
+        assertEquals(3L, dispatcher.snapshot().maxQueueDelayMs)
+    }
+
+    @Test
+    fun `maxQueueDelayMs is positive when a block queues behind a held block on a real single thread`() {
+        val single = Executors.newSingleThreadExecutor()
+        try {
+            val clockNs = AtomicLong(0)
+            val dispatcher = InstrumentedDispatcher(single.asCoroutineDispatcher(), "single", nanoTime = clockNs::get)
+            val firstStarted = CountDownLatch(1)
+            val releaseFirst = CountDownLatch(1)
+            val bothDone = CountDownLatch(2)
+
+            dispatcher.dispatch(EmptyCoroutineContext) {
+                firstStarted.countDown()
+                releaseFirst.await(5, TimeUnit.SECONDS)
+                bothDone.countDown()
+            }
+            assertTrue(firstStarted.await(5, TimeUnit.SECONDS))
+            dispatcher.dispatch(EmptyCoroutineContext) { bothDone.countDown() } // queued behind the held first
+            clockNs.addAndGet(9_000_000L) // 9 ms pass while the second block waits in the pool queue
+            releaseFirst.countDown()
+            assertTrue(bothDone.await(5, TimeUnit.SECONDS))
+
+            val snapshot = dispatcher.snapshot()
+            assertEquals(9L, snapshot.maxQueueDelayMs)
+            assertEquals(1, snapshot.peakConcurrency)
+            assertEquals(2L, snapshot.totalDispatched)
+        } finally {
+            single.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `wrapping a global dispatcher leaves it untouched and only measures dispatches through the wrapper`() {
         val before = Dispatchers.IO
-        DispatcherInstrumentation().wrap(Dispatchers.IO)
+        val beforeText = before.toString()
+        val instrumentation = DispatcherInstrumentation()
+
+        val wrapper = instrumentation.wrap(Dispatchers.IO)
+
         assertSame(before, Dispatchers.IO)
-        assertTrue(Dispatchers.IO !is InstrumentedDispatcher)
+        assertEquals(beforeText, Dispatchers.IO.toString())
+        assertNotSame(Dispatchers.IO, wrapper)
+        assertEquals("Dispatchers.IO", wrapper.label)
+
+        // Dispatching straight to the global dispatcher is not observed by the wrapper...
+        val direct = CountDownLatch(1)
+        Dispatchers.IO.dispatch(EmptyCoroutineContext) { direct.countDown() }
+        assertTrue(direct.await(5, TimeUnit.SECONDS))
+        assertEquals(0L, instrumentation.snapshots().getValue("Dispatchers.IO").totalDispatched)
+
+        // ...while dispatching through the wrapper reaches the very same global dispatcher.
+        val viaWrapper = CountDownLatch(1)
+        val threadName = AtomicReference<String>()
+        wrapper.dispatch(EmptyCoroutineContext) {
+            threadName.set(Thread.currentThread().name)
+            viaWrapper.countDown()
+        }
+        assertTrue(viaWrapper.await(5, TimeUnit.SECONDS))
+        assertTrue(threadName.get(), threadName.get().startsWith("DefaultDispatcher-worker"))
+        assertEquals(1L, instrumentation.snapshots().getValue("Dispatchers.IO").totalDispatched)
     }
 }
