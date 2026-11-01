@@ -25,10 +25,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (per-instance `dispatcher()` > `defaultAsyncDispatcher` > `Dispatchers.Default`, shared dispatchers wrapped
   once) and exposes `AppStartupInitializer.dispatcherSnapshots()` with `peakConcurrency`,
   `maxQueueDelayMs` and `totalDispatched` per label. `StartupMetric.dispatcherName` then reports that label.
+  The label is derived from the dispatcher's `toString()` with the identity hash, bracketed pool
+  statistics and package prefix removed (e.g. `ThreadPoolExecutor`, `Dispatchers.IO`), so it is stable
+  across runs; distinct dispatchers with the same derived label get a `#n` suffix. There is no API to set
+  a custom label.
   Wrapping `Dispatchers.IO` reduces its thread-pool elasticity and adds one `withContext` hop, so do not
   enable it in production.
 - `StartupMetric.permitWaitMs` (trailing defaulted field, always measured): time spent waiting for the
   concurrency permit, so `queueDelayMs - permitWaitMs` isolates dispatcher scheduling delay.
+  `permitWaitMs <= queueDelayMs` always holds: when an initializer is cancelled after acquiring its
+  permit but before `create()` starts, `queueDelayMs` is measured up to the cancellation instead of
+  being `0`. `permitWaitMs` is `0` when no concurrency cap is configured.
   ABI note: the data-class `copy`/`componentN` signatures gain one parameter (`permitWaitMs`); the
   `@JvmOverloads` constructors and Kotlin named-argument construction remain source-compatible.
 - Public API guard: `core/api/core.api` is the committed ABI dump; CI runs `./gradlew :core:apiCheck`

@@ -137,7 +137,10 @@ class AppStartupConfig private constructor(
          * initializer (per-instance `dispatcher()` > [defaultAsyncDispatcher] > `Dispatchers.Default`)
          * is wrapped once in a measuring dispatcher. Per-dispatcher peak concurrency, max queue delay and
          * dispatch count are then available from [AppStartupInitializer.dispatcherSnapshots], and
-         * [StartupMetric.dispatcherName] reports the stable label instead of the raw `toString()`.
+         * [StartupMetric.dispatcherName] reports a readable label derived from the dispatcher
+         * (`toString()` without identity hash, bracketed pool statistics and package prefix, e.g.
+         * `ThreadPoolExecutor`, `Dispatchers.IO`), so it is stable across runs. Distinct dispatchers that
+         * derive the same label get a `#n` suffix. There is no way to set a custom label.
          * Global dispatchers are never altered, only the library's own dispatch is measured.
          *
          * Warning: wrapping `Dispatchers.IO` reduces its thread-pool elasticity and `withContext` no
