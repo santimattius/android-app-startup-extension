@@ -109,8 +109,9 @@ class InstrumentedDispatcherTest {
         assertSame(a, b)
         assertNotSame(a, other)
         assertEquals(2, instrumentation.snapshots().size)
-        assertTrue(instrumentation.snapshots().all { (key, s) -> key == s.label })
-        assertEquals(shared.toString(), a.label)
+        assertEquals(setOf(a.label, other.label), instrumentation.snapshots().keys)
+        assertEquals("ThreadPoolExecutor", a.label)
+        assertEquals("Executors\$FinalizableDelegatedExecutorService", other.label)
     }
 
     @Test

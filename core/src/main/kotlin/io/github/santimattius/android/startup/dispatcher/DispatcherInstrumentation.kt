@@ -15,7 +15,7 @@ internal class DispatcherInstrumentation {
 
     fun wrap(delegate: CoroutineDispatcher): InstrumentedDispatcher =
         delegate as? InstrumentedDispatcher
-            ?: wrappers.getOrPut(delegate) { InstrumentedDispatcher(delegate, uniqueLabel(delegate.toString())) }
+            ?: wrappers.getOrPut(delegate) { InstrumentedDispatcher(delegate, uniqueLabel(deriveDispatcherLabel(delegate))) }
 
     fun snapshots(): Map<String, DispatcherSnapshot> =
         wrappers.values.map { it.snapshot() }.associateBy { it.label }
@@ -25,3 +25,22 @@ internal class DispatcherInstrumentation {
         return if (n == 1) base else "$base#$n"
     }
 }
+
+private val VOLATILE_STATS = Regex("\\[.*]")
+private val IDENTITY_HASH = Regex("@[0-9a-fA-F]+")
+private val PACKAGE_PREFIX = Regex("^(?:[a-z_][a-z0-9_]*\\.)+(?=[A-Z_$])")
+
+/**
+ * Derives a human-readable label that is stable across runs from the dispatcher's `toString()`:
+ * bracketed statistics (`[Running, pool size = 2, ...]`), the identity hash (`@1a2b3c`) and a
+ * leading lowercase package path are removed, so `java.util.concurrent.ThreadPoolExecutor@1a[...]`
+ * becomes `ThreadPoolExecutor` while `Dispatchers.IO` is kept. Falls back to the class name when
+ * nothing readable remains.
+ */
+internal fun deriveDispatcherLabel(dispatcher: CoroutineDispatcher): String =
+    dispatcher.toString()
+        .replace(VOLATILE_STATS, "")
+        .replace(IDENTITY_HASH, "")
+        .trim()
+        .replace(PACKAGE_PREFIX, "")
+        .ifBlank { dispatcher.javaClass.name.substringAfterLast('.') }
