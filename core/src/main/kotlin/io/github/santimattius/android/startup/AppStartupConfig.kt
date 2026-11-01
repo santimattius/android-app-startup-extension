@@ -121,7 +121,13 @@ class AppStartupConfig private constructor(
          * How many of the most recent [StartupMetric]s a late collector of
          * [AppStartupInitializer.metricsFlow] can still receive. Defaults to `256`, enough for the full
          * startup of any realistic app. When exceeded, the oldest metrics are dropped first and
-         * emitters never suspend. Values `<= 0` fall back to the default at [build] time.
+         * emitters never suspend.
+         *
+         * The same bound applies to LIVE collectors: there is no extra buffer, so a collector that
+         * lags behind by more than this many metrics also loses the oldest ones (`DROP_OLDEST`). The
+         * warning about dropped metrics is only logged when [debugLoggingEnabled] is `true`.
+         *
+         * Values `<= 0` fall back to the default at [build] time.
          */
         var metricsReplayCapacity: Int = DEFAULT_METRICS_REPLAY_CAPACITY
 

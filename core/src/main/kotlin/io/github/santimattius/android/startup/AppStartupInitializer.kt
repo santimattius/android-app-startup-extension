@@ -82,6 +82,11 @@ class AppStartupInitializer internal constructor(
      * i.e. the full startup unless more initializers than that ran. Beyond the bound the oldest
      * metrics are dropped first and emitters never suspend.
      *
+     * **Slow live collectors lose metrics too:** the same bound applies to a collector that is already
+     * subscribed. There is no extra buffer, so if it lags behind by more than the capacity it skips
+     * the oldest metrics (`DROP_OLDEST`). The drop warning is only logged when debug logging is
+     * enabled, so the loss is otherwise silent.
+     *
      * **Thread of emission:** metrics are emitted from the initializer's own thread —
      * the Main Thread for sync initializers, and the initializer's `dispatcher()` for async ones.
      * [SharedFlow] handles the cross-thread delivery internally: your `collect` lambda always
