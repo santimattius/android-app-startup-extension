@@ -15,7 +15,11 @@ internal class DispatcherInstrumentation {
 
     fun wrap(delegate: CoroutineDispatcher): InstrumentedDispatcher =
         delegate as? InstrumentedDispatcher
-            ?: wrappers.getOrPut(delegate) { InstrumentedDispatcher(delegate, uniqueLabel(deriveDispatcherLabel(delegate))) }
+            ?: wrappers.computeIfAbsent(delegate) {
+                // Atomic per key: the label (a side effect) is derived once, so racing wraps of one
+                // shared dispatcher never burn a `#n` suffix.
+                InstrumentedDispatcher(delegate, uniqueLabel(deriveDispatcherLabel(delegate)))
+            }
 
     fun snapshots(): Map<String, DispatcherSnapshot> =
         wrappers.values.map { it.snapshot() }.associateBy { it.label }
