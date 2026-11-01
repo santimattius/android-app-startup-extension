@@ -6,6 +6,7 @@ import io.github.santimattius.android.startup.trace.StartupTraceNames
 import io.github.santimattius.android.startup.trace.StartupTracer
 import io.github.santimattius.android.startup.trace.SystemStartupTracer
 import io.github.santimattius.android.startup.trace.closeAsyncSection
+import io.github.santimattius.android.startup.trace.mark
 import io.github.santimattius.android.startup.trace.openAsyncSection
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
@@ -107,8 +108,17 @@ internal class AppStartupCoroutinesEngine(
         if (tracer.isAsyncEnabled) synchronized(counterLock) { tracer.setCounter(name, value().toLong()) }
     }
 
+    /** Publishes [state] and, only on an actual transition, records a zero-length marker. */
+    private fun transitionTo(state: StartupState) {
+        if (_startupState.value == state) return
+        _startupState.value = state
+        tracer.mark { StartupTraceNames.of("marker::${state.name}", null) }
+    }
+
+    private fun markCancel() = tracer.mark { StartupTraceNames.of("marker::cancel", null) }
+
     fun <T> launchStartJob(block: suspend CoroutineScope.() -> T) {
-        _startupState.value = StartupState.IN_PROGRESS
+        transitionTo(StartupState.IN_PROGRESS)
         _startJobs.add(async { block() })
     }
 
@@ -178,11 +188,12 @@ internal class AppStartupCoroutinesEngine(
         val span = tracer.openAsyncSection { StartupTraceNames.of("awaitAll", null) }
         try {
             _startJobs.awaitAll()
-            _startupState.value = StartupState.COMPLETED
+            transitionTo(StartupState.COMPLETED)
         } catch (e: CancellationException) {
+            markCancel()
             throw e
         } catch (e: Throwable) {
-            _startupState.value = StartupState.ERROR
+            transitionTo(StartupState.ERROR)
             throw e
         } finally {
             _startJobs.clear()
@@ -206,12 +217,13 @@ internal class AppStartupCoroutinesEngine(
             withTimeout(timeoutMs) {
                 _startJobs.awaitAll()
             }
-            _startupState.value = StartupState.COMPLETED
+            transitionTo(StartupState.COMPLETED)
         } catch (e: CancellationException) {
+            markCancel()
             _startJobs.filter { it.isActive }.forEach { it.cancel() }
             throw e
         } catch (e: Throwable) {
-            _startupState.value = StartupState.ERROR
+            transitionTo(StartupState.ERROR)
             throw e
         } finally {
             _startJobs.clear()
@@ -222,6 +234,7 @@ internal class AppStartupCoroutinesEngine(
     internal fun areAllStartJobsDone(): Boolean = startJobs.none { it.isActive }
 
     fun cancel() {
+        markCancel()
         supervisorJob.cancel()
     }
 
