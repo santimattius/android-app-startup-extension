@@ -3,6 +3,7 @@ package io.github.santimattius.android.startup
 import android.content.Context
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -74,6 +75,29 @@ class StartupMetricsBusTest {
         job.cancel()
 
         assertEquals((0 until 100).map { "Init$it" }, received.map { it.initializerName })
+    }
+
+    @Test
+    fun `live collector lagging more than the capacity loses the oldest metrics`() = runTest {
+        val bus = StartupMetricsBus(capacity = 4)
+        val gate = CompletableDeferred<Unit>()
+        val received = mutableListOf<StartupMetric>()
+        val job = launch(UnconfinedTestDispatcher(testScheduler)) {
+            bus.metricsFlow.collect {
+                received += it
+                gate.await() // stays suspended on the first metric while the rest are published
+            }
+        }
+
+        bus.publishAll(10) // 0 is delivered; 1..9 pile up while the collector is suspended
+        gate.complete(Unit)
+        job.cancel()
+
+        // The collector kept its in-flight metric (0) plus only the most recent `capacity` ones.
+        assertEquals(
+            listOf("Init0", "Init6", "Init7", "Init8", "Init9"),
+            received.map { it.initializerName },
+        )
     }
 
     @Test
