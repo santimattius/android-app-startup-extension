@@ -19,7 +19,8 @@ package io.github.santimattius.android.startup
  *   `create()` at the moment this one was launched. Always `0` for sync initializers.
  * @property queueDelayMs Monotonic milliseconds elapsed between the initializer becoming ready to run
  *   and actually starting execution (semaphore wait + dispatcher scheduling latency). Always `0` for
- *   sync initializers.
+ *   sync initializers. If the initializer is cancelled before `create()` started, it is measured up to
+ *   the cancellation, so it is never smaller than [permitWaitMs].
  * @property startTimestampMs `SystemClock.uptimeMillis()` when `create()` started. Same clock as
  *   [Process.getStartUptimeMillis][android.os.Process.getStartUptimeMillis]. `0` when unknown.
  * @property endTimestampMs [startTimestampMs] + [durationMs] (derived, so the three are always
@@ -36,7 +37,8 @@ package io.github.santimattius.android.startup
  * @property errorMessage [Throwable.message] of the failure, `null` when absent or on success.
  * @property permitWaitMs Milliseconds spent waiting for the global concurrency permit (always measured,
  *   even with dispatcher instrumentation off). `queueDelayMs - permitWaitMs` approximates the dispatcher
- *   scheduling delay. `0` for sync initializers.
+ *   scheduling delay, and `permitWaitMs <= queueDelayMs` always holds. `0` for sync initializers and
+ *   when no concurrency cap is configured (the acquire is then a no-op).
  */
 data class StartupMetric @JvmOverloads constructor(
     val initializerName: String,

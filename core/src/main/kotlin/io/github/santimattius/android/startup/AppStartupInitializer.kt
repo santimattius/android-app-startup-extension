@@ -466,11 +466,13 @@ class AppStartupInitializer internal constructor(
                     var wasCancelled = false
                     var failure: Throwable? = null
                     var startedNs = requestedNs
+                    var bodyStarted = false
                     var startedUptimeMs = 0L
                     var executionThreadName = ""
                     try {
                         val result = withContext(effectiveDispatcher) {
                             startedNs = System.nanoTime()
+                            bodyStarted = true
                             startedUptimeMs = SystemClock.uptimeMillis()
                             executionThreadName = Thread.currentThread().name
                             tracer.asyncSection({ StartupTraceNames.of("create", component.name) }) {
@@ -489,7 +491,11 @@ class AppStartupInitializer internal constructor(
                     } finally {
                         coroutinesEngine.exitActive()
                         coroutinesEngine.releaseAsyncPermit()
-                        val durationMs = (System.nanoTime() - startedNs) / 1_000_000L
+                        val finishedNs = System.nanoTime()
+                        val durationMs = (finishedNs - startedNs) / 1_000_000L
+                        // A body that never started (cancelled while queued) has no start instant, so the
+                        // queue delay runs up to the cancellation. This keeps queueDelayMs >= permitWaitMs.
+                        val queueDelayMs = ((if (bodyStarted) startedNs else finishedNs) - requestedNs) / 1_000_000L
                         metricsBus.publish(
                             StartupMetric(
                                 initializerName = component.simpleName,
@@ -500,7 +506,7 @@ class AppStartupInitializer internal constructor(
                                 dispatcherName = effectiveDispatcher.toString(),
                                 threadName = executionThreadName,
                                 concurrentActiveCount = activeSnapshot,
-                                queueDelayMs = (startedNs - requestedNs) / 1_000_000L,
+                                queueDelayMs = queueDelayMs,
                                 startTimestampMs = startedUptimeMs,
                                 // 0 (unknown) when the body never started, e.g. cancelled while queued.
                                 endTimestampMs = if (startedUptimeMs == 0L) 0L else startedUptimeMs + durationMs,

@@ -16,6 +16,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
@@ -33,6 +34,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.ContinuationInterceptor
+import kotlin.coroutines.CoroutineContext
 
 /** Spec: startup-dispatcher-instrumentation wiring (opt-in, precedence, failure, permitWaitMs). */
 @RunWith(RobolectricTestRunner::class)
@@ -165,6 +167,39 @@ class InstrumentedDispatcherWiringTest {
     }
 
     @Test
+    fun `permitWaitMs stays within queueDelayMs when cancelled after the permit and before the body starts`() {
+        val parking = ParkingDispatcher()
+        AppStartupInitializer.configure {
+            maxConcurrentAsyncInitializers = 1
+            defaultAsyncDispatcher = parking
+        }
+        val tracer = RecordingStartupTracer()
+        val initializer = AppStartupInitializer(context, tracer = tracer)
+        val permitWait = StartupTraceNames.of("permitWait", PlainInit::class.java.name)
+
+        runBlocking {
+            initializer.coroutinesEngine.acquireAsyncPermit() // hold the only permit
+            val job = launch(Dispatchers.Default) { initializer.doInitialize<String>(PlainInit::class.java) }
+            awaitCondition { tracer.asyncBeginIndex(permitWait) >= 0 } // the waiter is requesting the permit
+            delay(WAIT_FLOOR_MS) // guaranteed lower bound on the time spent waiting for the permit
+            initializer.coroutinesEngine.releaseAsyncPermit()
+            assertTrue(parking.dispatched.await(5, TimeUnit.SECONDS)) // permit acquired, body queued, never run
+            job.cancel()
+            parking.runParked() // a cancelled dispatched block completes without running the body
+            job.join()
+        }
+
+        val metric = initializer.metricsFlow.replayCache.single()
+        assertTrue(metric.wasCancelled)
+        assertEquals(0L, metric.startTimestampMs)
+        assertTrue("permit wait must be measured, got ${metric.permitWaitMs}", metric.permitWaitMs >= WAIT_FLOOR_MS - 5)
+        assertTrue(
+            "queueDelayMs=${metric.queueDelayMs} must cover permitWaitMs=${metric.permitWaitMs}",
+            metric.permitWaitMs <= metric.queueDelayMs,
+        )
+    }
+
+    @Test
     fun `permitWaitMs is negligible without a cap and never exceeds queueDelayMs`() = runTest {
         AppStartupInitializer.configure { defaultAsyncDispatcher = configDispatcher }
         val initializer = AppStartupInitializer(context)
@@ -249,6 +284,21 @@ class InstrumentedDispatcherWiringTest {
 
         const val WAIT_FLOOR_MS = 40L
         const val NEGLIGIBLE_MS = 50L
+    }
+
+    /** Holds dispatched blocks until told to run them, to model "permit acquired, body not started". */
+    class ParkingDispatcher : CoroutineDispatcher() {
+        val dispatched = CountDownLatch(1)
+        private val parked = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            parked.add(block)
+            dispatched.countDown()
+        }
+
+        fun runParked() {
+            generateSequence { parked.poll() }.forEach { it.run() }
+        }
     }
 
     private class DependencyInit : StartupAsyncInitializer<String> {
