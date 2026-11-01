@@ -4,8 +4,11 @@ package io.github.santimattius.android.startup.dispatcher
  * Point-in-time counters of one instrumented dispatcher (see
  * [io.github.santimattius.android.startup.AppStartupConfig.Builder.dispatcherInstrumentationEnabled]).
  *
- * @property label Stable key of the dispatcher (the wrapped dispatcher's `toString()` at wrap time;
- *   disambiguated with a `#n` suffix when two distinct dispatchers share the same text).
+ * @property label Key of the dispatcher, derived from the wrapped dispatcher's `toString()` at wrap
+ *   time with the volatile parts removed (identity hash such as `@1a2b3c`, bracketed pool statistics
+ *   such as `[Running, pool size = 2, ...]` and the package prefix), so it is stable across runs, e.g.
+ *   `ThreadPoolExecutor` or `Dispatchers.IO`. Distinct dispatchers deriving the same text are
+ *   disambiguated with a `#n` suffix. It cannot be set by the caller.
  * @property peakConcurrency Highest number of dispatched blocks running at the same time.
  * @property maxQueueDelayMs Longest time (ms) a block waited between dispatch and starting to run.
  *   This is dispatcher/pool latency only; library semaphore wait is
