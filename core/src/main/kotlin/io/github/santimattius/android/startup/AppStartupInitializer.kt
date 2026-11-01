@@ -11,6 +11,8 @@ import android.os.StrictMode
 import android.os.SystemClock
 import android.os.Trace
 import android.util.Log
+import io.github.santimattius.android.startup.dispatcher.DispatcherInstrumentation
+import io.github.santimattius.android.startup.dispatcher.DispatcherSnapshot
 import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
@@ -72,6 +74,14 @@ class AppStartupInitializer internal constructor(
     )
 
     private val metricsBus = StartupMetricsBus(config.metricsReplayCapacity)
+
+    private val dispatcherInstrumentation = DispatcherInstrumentation()
+
+    /**
+     * Per-dispatcher counters keyed by label. Empty unless
+     * [AppStartupConfig.Builder.dispatcherInstrumentationEnabled] is `true` (debug/measurement only).
+     */
+    fun dispatcherSnapshots(): Map<String, DispatcherSnapshot> = dispatcherInstrumentation.snapshots()
 
     /**
      * Hot [SharedFlow] that emits a [StartupMetric] after each initializer completes,
@@ -429,8 +439,14 @@ class AppStartupInitializer internal constructor(
                     }
 
                     StartupExtensionLogger.info { "Initializing ${component.name}" }
-                    val effectiveDispatcher =
+                    val resolvedDispatcher =
                         asyncInitializer.dispatcher() ?: config.defaultAsyncDispatcher
+                    val effectiveDispatcher: CoroutineDispatcher =
+                        if (config.dispatcherInstrumentationEnabled) {
+                            dispatcherInstrumentation.wrap(resolvedDispatcher)
+                        } else {
+                            resolvedDispatcher
+                        }
 
                     // Dependencies are fully resolved above (deps + syncDependencies), so this clock
                     // starts AFTER dependency resolution and BEFORE the concurrency permit is
@@ -442,6 +458,7 @@ class AppStartupInitializer internal constructor(
                     tracer.asyncSection({ StartupTraceNames.of("permitWait", component.name) }) {
                         coroutinesEngine.acquireAsyncPermit()
                     }
+                    val permitWaitMs = (System.nanoTime() - requestedNs) / 1_000_000L
                     val activeSnapshot = coroutinesEngine.enterActive()
                     maybeWarnStrictModeConcurrency(activeSnapshot, effectiveDispatcher)
 
@@ -492,6 +509,7 @@ class AppStartupInitializer internal constructor(
                                 initializerFqn = component.name,
                                 errorType = failure?.javaClass?.name,
                                 errorMessage = failure?.message,
+                                permitWaitMs = permitWaitMs,
                             )
                         )
                     }

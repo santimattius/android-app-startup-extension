@@ -34,6 +34,9 @@ package io.github.santimattius.android.startup
  * @property errorType Class name of the throwable that failed `create()`, `null` on success and on
  *   cancellation. Only strings are kept so a metric never retains a stack trace or captured state.
  * @property errorMessage [Throwable.message] of the failure, `null` when absent or on success.
+ * @property permitWaitMs Milliseconds spent waiting for the global concurrency permit (always measured,
+ *   even with dispatcher instrumentation off). `queueDelayMs - permitWaitMs` approximates the dispatcher
+ *   scheduling delay. `0` for sync initializers.
  */
 data class StartupMetric @JvmOverloads constructor(
     val initializerName: String,
@@ -52,4 +55,5 @@ data class StartupMetric @JvmOverloads constructor(
     val initializerFqn: String = "",
     val errorType: String? = null,
     val errorMessage: String? = null,
+    val permitWaitMs: Long = 0L,
 )
