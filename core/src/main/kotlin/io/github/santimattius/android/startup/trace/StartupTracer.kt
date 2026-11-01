@@ -69,3 +69,8 @@ internal inline fun StartupTracer.openAsyncSection(name: () -> String): AsyncSpa
 internal fun StartupTracer.closeAsyncSection(span: AsyncSpan?) {
     if (span != null) endAsyncSection(span.name, span.cookie)
 }
+
+/** Emits a zero-length marker slice if enabled; the name lambda is evaluated only when enabled. */
+internal inline fun StartupTracer.mark(name: () -> String) {
+    if (isEnabled) marker(name())
+}

@@ -22,6 +22,7 @@ import io.github.santimattius.android.startup.trace.SystemStartupTracer
 import io.github.santimattius.android.startup.trace.asyncSection
 import io.github.santimattius.android.startup.trace.closeAsyncSection
 import io.github.santimattius.android.startup.trace.closeSection
+import io.github.santimattius.android.startup.trace.mark
 import io.github.santimattius.android.startup.trace.openAsyncSection
 import io.github.santimattius.android.startup.trace.openSection
 import io.github.santimattius.android.startup.trace.section
@@ -66,7 +67,7 @@ class AppStartupInitializer internal constructor(
     private val tracer: StartupTracer = SystemStartupTracer,
 ) {
 
-    private val registry = InitializerRegistry()
+    private val registry = InitializerRegistry(tracer)
 
     internal val coroutinesEngine = AppStartupCoroutinesEngine(
         coroutineDispatcher ?: Dispatchers.Default,
@@ -562,24 +563,29 @@ class AppStartupInitializer internal constructor(
      * @see doInitialize
      */
     private fun syncDiscoverAndInitialize(metadata: Bundle) {
-        syncDiscovered.addAll(
-            metadata.keySet()
-                .filter { key -> metadata.getString(key) == KEY_SYNC_INITIALIZER }
-                .mapNotNull { key ->
-                    try {
-                        Class.forName(key, false, applicationContext.classLoader)
-                            .takeIf { StartupSyncInitializer::class.java.isAssignableFrom(it) }
-                            ?.let { it as Class<out StartupSyncInitializer<*>> }
-                            ?.also { StartupExtensionLogger.info { "Discovered $key" } }
-                    } catch (e: ClassNotFoundException) {
-                        throw StartupExtensionException(e)
+        tracer.section({ StartupTraceNames.of("discover::sync", null) }) {
+            syncDiscovered.addAll(
+                metadata.keySet()
+                    .filter { key -> metadata.getString(key) == KEY_SYNC_INITIALIZER }
+                    .mapNotNull { key ->
+                        try {
+                            Class.forName(key, false, applicationContext.classLoader)
+                                .takeIf { StartupSyncInitializer::class.java.isAssignableFrom(it) }
+                                ?.let { it as Class<out StartupSyncInitializer<*>> }
+                                ?.also { StartupExtensionLogger.info { "Discovered $key" } }
+                        } catch (e: ClassNotFoundException) {
+                            throw StartupExtensionException(e)
+                        }
                     }
-                }
-        )
+            )
+        }
 
         val ordered = when (config.syncOrderingStrategy) {
             is SyncOrderingStrategy.Lazy -> syncDiscovered.toList()
-            is SyncOrderingStrategy.Topological -> topologicalSort(syncDiscovered)
+            is SyncOrderingStrategy.Topological ->
+                tracer.section({ StartupTraceNames.of("resolveGraph::topological", null) }) {
+                    topologicalSort(syncDiscovered)
+                }
         }
 
         val initializing = mutableSetOf<Class<*>>()
@@ -672,30 +678,37 @@ class AppStartupInitializer internal constructor(
      * - Logs debug messages to `StartupExtensionLogger` if debug mode is enabled.
      */
     private fun asyncDiscoverAndInitialize(metadata: Bundle) {
-        asyncDiscovered.addAll(
-            metadata.keySet()
-                .filter { key -> metadata.getString(key) == KEY_ASYNC_INITIALIZER }
-                .mapNotNull { key ->
-                    try {
-                        Class.forName(key, false, applicationContext.classLoader)
-                            .takeIf { StartupAsyncInitializer::class.java.isAssignableFrom(it) }
-                            ?.let { it as Class<out StartupAsyncInitializer<*>> }
-                            ?.also { StartupExtensionLogger.info { "Discovered $key" } }
-                    } catch (e: ClassNotFoundException) {
-                        throw StartupExtensionException(e)
+        tracer.section({ StartupTraceNames.of("discover::async", null) }) {
+            asyncDiscovered.addAll(
+                metadata.keySet()
+                    .filter { key -> metadata.getString(key) == KEY_ASYNC_INITIALIZER }
+                    .mapNotNull { key ->
+                        try {
+                            Class.forName(key, false, applicationContext.classLoader)
+                                .takeIf { StartupAsyncInitializer::class.java.isAssignableFrom(it) }
+                                ?.let { it as Class<out StartupAsyncInitializer<*>> }
+                                ?.also { StartupExtensionLogger.info { "Discovered $key" } }
+                        } catch (e: ClassNotFoundException) {
+                            throw StartupExtensionException(e)
+                        }
                     }
-                }
-        )
+            )
+        }
         val toLaunch = when (config.asyncInitializerStrategy) {
             is AsyncInitializerStrategy.Concurrent -> asyncDiscovered
-            is AsyncInitializerStrategy.Validated -> asyncValidateAndGetRoots(asyncDiscovered)
+            is AsyncInitializerStrategy.Validated ->
+                tracer.section({ StartupTraceNames.of("resolveGraph::validateRoots", null) }) {
+                    asyncValidateAndGetRoots(asyncDiscovered)
+                }
         }
 
         // Resolve priority inversions first (clamps a DEFERRED node up to its most-eager transitive
         // dependent and warns once), then partition the roots we are about to launch by EFFECTIVE
         // priority. Eager (NORMAL/CRITICAL — CRITICAL behaves like NORMAL in v1) roots launch
         // immediately on the critical path; DEFERRED roots are gated behind the first-frame signal.
-        val effective = computeEffectivePriorities(asyncDiscovered)
+        val effective = tracer.section({ StartupTraceNames.of("resolveGraph::effectivePriorities", null) }) {
+            computeEffectivePriorities(asyncDiscovered)
+        }
         val (deferredRoots, eagerRoots) = toLaunch.partition {
             effective[it] == StartupPriority.DEFERRED
         }
@@ -719,7 +732,14 @@ class AppStartupInitializer internal constructor(
                 // and rethrows any external CancellationException. Tracked in _deferredStartJobs, so
                 // awaitAllStartJobs() never awaits it.
                 coroutinesEngine.launchDeferredStartJob {
-                    withTimeoutOrNull(config.deferredStartupTimeoutMs) { signal.await() }
+                    val fqn = initializer.name
+                    val signalled = tracer.asyncSection({ StartupTraceNames.of("deferred::awaitFirstFrame", fqn) }) {
+                        withTimeoutOrNull(config.deferredStartupTimeoutMs) { signal.await() }
+                    }
+                    // android.os.Trace carries no metadata, so the outcome is encoded as a marker name.
+                    tracer.mark {
+                        StartupTraceNames.of(if (signalled != null) "marker::deferredSignal" else "marker::deferredTimeout", fqn)
+                    }
                     doAsyncInitialize<Any>(initializer, HashSet())
                 }
             }
