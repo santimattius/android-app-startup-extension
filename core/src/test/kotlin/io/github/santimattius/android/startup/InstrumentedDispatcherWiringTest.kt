@@ -8,10 +8,14 @@ import android.os.Build
 import android.os.Bundle
 import io.github.santimattius.android.startup.dispatcher.InstrumentedDispatcher
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
+import io.github.santimattius.android.startup.trace.RecordingStartupTracer
+import io.github.santimattius.android.startup.trace.StartupTraceNames
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
@@ -131,12 +135,13 @@ class InstrumentedDispatcherWiringTest {
             defaultAsyncDispatcher = roomyDispatcher
             dispatcherInstrumentationEnabled = true
         }
-        val initializer = AppStartupInitializer(context)
+        val tracer = RecordingStartupTracer()
+        val initializer = AppStartupInitializer(context, tracer = tracer)
 
-        val metrics = runCapOneScenario(initializer)
+        val metrics = runCapOneScenario(initializer, tracer)
 
         val waiter = metrics.maxByOrNull { it.permitWaitMs }!!
-        assertTrue("waiter must wait for the permit, got ${waiter.permitWaitMs}", waiter.permitWaitMs >= 30)
+        assertTrue("waiter must wait for the permit, got ${waiter.permitWaitMs}", waiter.permitWaitMs >= WAIT_FLOOR_MS - 5)
         assertTrue(metrics.all { it.permitWaitMs <= it.queueDelayMs })
         assertTrue(
             "dispatcher queue must stay below the semaphore wait",
@@ -150,19 +155,69 @@ class InstrumentedDispatcherWiringTest {
             maxConcurrentAsyncInitializers = 1
             defaultAsyncDispatcher = roomyDispatcher
         }
-        val initializer = AppStartupInitializer(context)
+        val tracer = RecordingStartupTracer()
+        val initializer = AppStartupInitializer(context, tracer = tracer)
 
-        val metrics = runCapOneScenario(initializer)
+        val metrics = runCapOneScenario(initializer, tracer)
 
-        assertTrue(metrics.maxOf { it.permitWaitMs } >= 30)
+        assertTrue(metrics.maxOf { it.permitWaitMs } >= WAIT_FLOOR_MS - 5)
         assertTrue(initializer.dispatcherSnapshots().isEmpty())
     }
 
-    private fun runCapOneScenario(initializer: AppStartupInitializer): List<StartupMetric> {
+    @Test
+    fun `permitWaitMs is negligible without a cap and never exceeds queueDelayMs`() = runTest {
+        AppStartupInitializer.configure { defaultAsyncDispatcher = configDispatcher }
+        val initializer = AppStartupInitializer(context)
+
+        initializer.doInitialize<String>(PlainInit::class.java)
+
+        val metric = initializer.metricsFlow.replayCache.single()
+        // No semaphore is configured, so the acquire is a no-op: only clock granularity remains.
+        assertTrue("got ${metric.permitWaitMs}", metric.permitWaitMs < NEGLIGIBLE_MS)
+        assertTrue(metric.permitWaitMs <= metric.queueDelayMs)
+    }
+
+    @Test
+    fun `at cap of 1 the dependency completes before the dependent starts waiting for its permit`() = runTest {
+        AppStartupInitializer.configure {
+            maxConcurrentAsyncInitializers = 1
+            defaultAsyncDispatcher = configDispatcher
+        }
+        val tracer = RecordingStartupTracer()
+        val initializer = AppStartupInitializer(context, tracer = tracer)
+
+        val result = initializer.doInitialize<String>(DependentInit::class.java)
+
+        assertEquals("dependent(dependency)", result)
+        val dependencyDone = tracer.asyncEndIndex(StartupTraceNames.of("create", DependencyInit::class.java.name))
+        val dependentWait = tracer.asyncBeginIndex(StartupTraceNames.of("permitWait", DependentInit::class.java.name))
+        assertTrue("dependency create() must have run", dependencyDone >= 0)
+        assertTrue("dependent must request its permit", dependentWait >= 0)
+        assertTrue(
+            "dependency finished at $dependencyDone, dependent requested a permit at $dependentWait",
+            dependencyDone < dependentWait,
+        )
+        assertEquals(2, initializer.metricsFlow.replayCache.size)
+    }
+
+    private suspend fun awaitCondition(condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (!condition()) {
+            check(System.nanoTime() < deadline) { "condition not reached in time" }
+            delay(1)
+        }
+    }
+
+    private fun runCapOneScenario(initializer: AppStartupInitializer, tracer: RecordingStartupTracer): List<StartupMetric> {
         stubManifest(HoldingInit::class.java, WaitingInit::class.java)
         initializer.discoverAndInitialize(InitializationProvider::class.java)
         assertTrue(firstRunning.await(5, TimeUnit.SECONDS))
-        Thread.sleep(50) // the other initializer is parked on the cap=1 permit meanwhile
+        // Both initializers have requested a permit; only one can hold the single permit until the gate
+        // opens, so the other one is parked on (or about to park on) the semaphore.
+        runBlocking { awaitCondition { tracer.events.count { it is RecordingStartupTracer.Event.AsyncBegin && it.name.startsWith("Startup::permitWait::") } == 2 } }
+        // Pure lower bound: the waiter requested its permit before this sleep started and cannot get it
+        // before the gate opens, so its permit wait is at least this long regardless of scheduling.
+        Thread.sleep(WAIT_FLOOR_MS)
         gate.countDown()
         runBlocking { initializer.awaitAllStartJobs() }
         return initializer.metricsFlow.replayCache.toList().also { assertEquals(2, it.size) }
@@ -191,6 +246,19 @@ class InstrumentedDispatcherWiringTest {
         val configDispatcher = named("wiring-config")
         val overrideDispatcher = named("wiring-override")
         val roomyDispatcher = named("wiring-roomy")
+
+        const val WAIT_FLOOR_MS = 40L
+        const val NEGLIGIBLE_MS = 50L
+    }
+
+    private class DependencyInit : StartupAsyncInitializer<String> {
+        override suspend fun create(context: Context): String = "dependency"
+    }
+
+    private class DependentInit : StartupAsyncInitializer<String> {
+        override fun dependencies(): List<Class<out StartupAsyncInitializer<*>>> = listOf(DependencyInit::class.java)
+
+        override suspend fun create(context: Context): String = "dependent(dependency)"
     }
 
     private open class Recording : StartupAsyncInitializer<String> {
