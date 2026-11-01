@@ -208,9 +208,20 @@ class AppStartupInitializer internal constructor(
      * @throws ClassCastException if the initialized object cannot be cast to type `T`.
      * @throws IllegalStateException if the initialization process encounters any issue.
      */
-    fun <T> doInitialize(component: Class<out StartupSyncInitializer<*>>): T {
+    fun <T> doInitialize(component: Class<out StartupSyncInitializer<*>>): T =
+        tracer.section({ StartupTraceNames.of("onDemand", component.name) }) {
+            initializeUnderSyncLock<T>(component)
+        }
+
+    /**
+     * Shared body of the public [doInitialize]. Startup's own sync-dependency resolution calls this
+     * directly so it is not tagged `onDemand` (that section marks only public entry points).
+     */
+    private fun <T> initializeUnderSyncLock(component: Class<out StartupSyncInitializer<*>>): T {
         var result: Any?
+        val waiting = tracer.openSection { StartupTraceNames.of("lockWait::sync", null) }
         synchronized(syncLock) {
+            tracer.closeSection(waiting)
             result = initialized[component]
             if (result == null) {
                 result = doInitialize<T>(component, HashSet())
@@ -240,8 +251,13 @@ class AppStartupInitializer internal constructor(
     suspend fun <T> doInitialize(component: Class<out StartupAsyncInitializer<*>>): T {
         // Fast path: already initialized, no lock needed (ConcurrentHashMap read is safe)
         initialized[component]?.let { return it as T }
-        return mutex.withLock {
-            initialized[component] ?: doAsyncInitialize(component, HashSet())
+        return tracer.asyncSection({ StartupTraceNames.of("onDemand", component.name) }) {
+            tracer.asyncSection({ StartupTraceNames.of("lockWait::async", component.name) }) { mutex.lock() }
+            try {
+                initialized[component] ?: doAsyncInitialize(component, HashSet())
+            } finally {
+                mutex.unlock()
+            }
         } as T
     }
 
@@ -437,7 +453,7 @@ class AppStartupInitializer internal constructor(
                         // before this async initializer's create() is invoked.
                         asyncInitializer.syncDependencies()
                             .filterNot(initialized::containsKey)
-                            .forEach { doInitialize<Any>(it) }
+                            .forEach { initializeUnderSyncLock<Any>(it) }
                     }
 
                     StartupExtensionLogger.info { "Initializing ${component.name}" }
