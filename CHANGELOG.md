@@ -20,6 +20,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The bound also applies to live collectors: one lagging by more than the capacity loses the oldest
   metrics (`DROP_OLDEST`, no extra buffer), and the drop warning is only logged when debug logging is
   enabled.
+- Opt-in dispatcher instrumentation (debug/measurement only): `AppStartupConfig.dispatcherInstrumentationEnabled`
+  (default `false`, dispatchers stay unwrapped) wraps only each initializer's effective dispatcher
+  (per-instance `dispatcher()` > `defaultAsyncDispatcher` > `Dispatchers.Default`, shared dispatchers wrapped
+  once) and exposes `AppStartupInitializer.dispatcherSnapshots()` with `peakConcurrency`,
+  `maxQueueDelayMs` and `totalDispatched` per label. `StartupMetric.dispatcherName` then reports that label.
+  Wrapping `Dispatchers.IO` reduces its thread-pool elasticity and adds one `withContext` hop, so do not
+  enable it in production.
+- `StartupMetric.permitWaitMs` (trailing defaulted field, always measured): time spent waiting for the
+  concurrency permit, so `queueDelayMs - permitWaitMs` isolates dispatcher scheduling delay.
+  ABI note: the data-class `copy`/`componentN` signatures gain one parameter (`permitWaitMs`); the
+  `@JvmOverloads` constructors and Kotlin named-argument construction remain source-compatible.
 - Public API guard: `core/api/core.api` is the committed ABI dump; CI runs `./gradlew :core:apiCheck`
   and `./gradlew :core:apiDump` regenerates it after an intentional change.
 
