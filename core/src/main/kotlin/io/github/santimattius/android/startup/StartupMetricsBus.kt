@@ -1,5 +1,7 @@
 package io.github.santimattius.android.startup
 
+import io.github.santimattius.android.startup.trace.StartupTracer
+import io.github.santimattius.android.startup.trace.SystemStartupTracer
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -16,6 +18,7 @@ import kotlinx.coroutines.flow.asSharedFlow
  */
 internal class StartupMetricsBus(
     private val capacity: Int = DEFAULT_METRICS_REPLAY_CAPACITY,
+    private val tracer: StartupTracer = SystemStartupTracer,
 ) {
 
     private val _flow = MutableSharedFlow<StartupMetric>(
@@ -25,10 +28,15 @@ internal class StartupMetricsBus(
 
     private val published = AtomicInteger(0)
 
+    /** Mirrors the bounded replay (`<= capacity`); owned here because `replayCache` copies the buffer. */
+    private val size = AtomicInteger(0)
+
     val metricsFlow: SharedFlow<StartupMetric> = _flow.asSharedFlow()
 
     fun publish(metric: StartupMetric) {
         _flow.tryEmit(metric)
+        size.updateAndGet { if (it < capacity) it + 1 else it }
+        if (tracer.isAsyncEnabled) synchronized(size) { tracer.setCounter(BUS_SIZE, size.get().toLong()) }
         if (published.incrementAndGet() == capacity + 1) {
             StartupExtensionLogger.warning {
                 "Metrics replay is bounded to $capacity; the oldest metrics are now dropped for late " +
@@ -37,3 +45,5 @@ internal class StartupMetricsBus(
         }
     }
 }
+
+private const val BUS_SIZE = "Startup::busSize"
