@@ -193,6 +193,30 @@ class StartupMetricsTest {
         }
     }
 
+    @Test
+    fun `cancelled before the body starts keeps timestamps consistent`() {
+        // The dispatcher parks the block, so withContext suspends before create() starts; the
+        // parked block is only released after cancellation, when it must not run create().
+        QueuedDispatcher.pending.clear()
+        runBlocking {
+            val job = launch {
+                runCatching { initializer.doInitialize<String>(NeverDispatchedAsyncInitializer::class.java) }
+            }
+            yield()
+            Thread.sleep(20) // make durationMs > 0 so a derived end timestamp would be nonzero
+            job.cancel()
+            QueuedDispatcher.pending.forEach { it.run() }
+            job.join()
+        }
+
+        with(initializer.metricsFlow.replayCache.single()) {
+            assertTrue(wasCancelled)
+            assertEquals(0L, startTimestampMs)
+            assertEquals(0L, endTimestampMs)
+            assertTrue(startTimestampMs <= endTimestampMs)
+        }
+    }
+
     // ── Fixtures ──────────────────────────────────────────────────────────────
 
     private class SimpleSyncInitializer : StartupSyncInitializer<String> {
@@ -232,6 +256,19 @@ class StartupMetricsTest {
         override suspend fun create(context: Context): String {
             kotlinx.coroutines.delay(Long.MAX_VALUE)
             return "never"
+        }
+    }
+
+    private class NeverDispatchedAsyncInitializer : StartupAsyncInitializer<String> {
+        override fun dispatcher(): kotlinx.coroutines.CoroutineDispatcher = QueuedDispatcher
+
+        override suspend fun create(context: Context): String = "never"
+    }
+
+    private object QueuedDispatcher : kotlinx.coroutines.CoroutineDispatcher() {
+        val pending = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+            pending.add(block)
         }
     }
 }

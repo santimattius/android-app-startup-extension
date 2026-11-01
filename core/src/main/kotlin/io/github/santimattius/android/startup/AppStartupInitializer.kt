@@ -478,7 +478,8 @@ class AppStartupInitializer internal constructor(
                                 concurrentActiveCount = activeSnapshot,
                                 queueDelayMs = (startedNs - requestedNs) / 1_000_000L,
                                 startTimestampMs = startedUptimeMs,
-                                endTimestampMs = startedUptimeMs + durationMs,
+                                // 0 (unknown) when the body never started, e.g. cancelled while queued.
+                                endTimestampMs = if (startedUptimeMs == 0L) 0L else startedUptimeMs + durationMs,
                                 processStartOffsetMs = processStartOffsetMs(startedUptimeMs),
                                 priority = asyncInitializer.priority(),
                                 initializerFqn = component.name,

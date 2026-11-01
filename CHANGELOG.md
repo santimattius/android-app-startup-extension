@@ -13,7 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `StartupMetric` has new trailing defaulted fields: `startTimestampMs`, `endTimestampMs`,
   `processStartOffsetMs`, `priority`, `initializerFqn`, `errorType` and `errorMessage`. Errors are
-  reported as strings only; no `Throwable` is retained. Timestamps use `SystemClock.uptimeMillis()`.
+  reported as strings only; no `Throwable` is retained. Timestamps use `SystemClock.uptimeMillis()`. An initializer cancelled before `create()` starts
+  reports `0` for both timestamps (unknown) instead of a nonzero end with a zero start.
 - Public API guard: `core/api/core.api` is the committed ABI dump; CI runs `./gradlew :core:apiCheck`
   and `./gradlew :core:apiDump` regenerates it after an intentional change.
 

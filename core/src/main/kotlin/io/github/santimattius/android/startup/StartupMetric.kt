@@ -23,7 +23,8 @@ package io.github.santimattius.android.startup
  * @property startTimestampMs `SystemClock.uptimeMillis()` when `create()` started. Same clock as
  *   [Process.getStartUptimeMillis][android.os.Process.getStartUptimeMillis]. `0` when unknown.
  * @property endTimestampMs [startTimestampMs] + [durationMs] (derived, so the three are always
- *   consistent). `0` when unknown.
+ *   consistent). `0` when unknown, which includes an initializer cancelled before `create()` started
+ *   (both timestamps are then `0`).
  * @property processStartOffsetMs Milliseconds from process start to [startTimestampMs]; useful to
  *   place the initializer on the process timeline. Never negative.
  * @property priority Declared [StartupPriority] of the initializer. Sync initializers have no
