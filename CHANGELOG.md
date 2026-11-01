@@ -63,6 +63,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Startup::busSize`; slices `Startup::lockWait::sync`, `Startup::lockWait::async::<FQN>` and `Startup::awaitAll`.
   Public `initializeComponent`/`doInitialize` calls are wrapped in `Startup::onDemand::<FQN>`; startup-driven
   initialization (including sync dependencies of async initializers) is not.
+- Zero-length trace markers `Startup::marker::IN_PROGRESS|COMPLETED|ERROR` (startup state transitions),
+  `Startup::marker::cancel`, `Startup::marker::priorityInversion::<FQN>` and `Startup::marker::strictModeConcurrency`,
+  emitted once per occurrence. They never change behavior and are skipped when tracing is disabled.
 - Each initializer class is now instantiated once per startup (graph passes no longer create
   throwaway instances).
 
