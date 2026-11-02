@@ -67,7 +67,7 @@ jobs:
       - name: Build release with R8
         run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
 
-      - name: Check manifest-declared initializers survive R8
+      - name: Check initializers (manifest-declared and dependency-only) survive R8
         run: .github/scripts/check-r8-initializers.sh
 
       - name: Analyze R8 configuration
