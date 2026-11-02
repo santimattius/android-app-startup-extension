@@ -16,7 +16,7 @@ startup time without blocking the main thread.
   the main thread.
 - **Startup State Lifecycle:** Observe the startup lifecycle (`IDLE → IN_PROGRESS → COMPLETED / ERROR`) via a `StateFlow`.
 - **Timeout Support:** Await all startup jobs with a configurable timeout.
-- **Metrics Flow:** Per-initializer timing, outcome, and concurrency/dispatcher data exposed as a hot `SharedFlow` — late collectors receive the full replay of all startup metrics.
+- **Metrics Flow:** Per-initializer timing, outcome, and concurrency/dispatcher data exposed as a hot `SharedFlow` — late collectors receive a bounded replay (the most recent `metricsReplayCapacity` metrics, 256 by default).
 - **Coroutine Storm Mitigation:** Optional cap on concurrent async `create()` executions (`maxConcurrentAsyncInitializers`) backed by a deadlock-safe `Semaphore`, plus a library-wide default dispatcher (`defaultAsyncDispatcher`) and a strict-mode warning when concurrency exceeds a configurable threshold.
 - **Startup Priority Staggering:** Mark an async initializer `DEFERRED` via `priority()` to launch it only after the first frame is drawn (or a timeout fallback), keeping non-critical work off the startup critical path.
 - **Cancellation Reporting:** `StartupMetric.wasCancelled` distinguishes structured cancellations from real failures.
@@ -29,6 +29,7 @@ startup time without blocking the main thread.
 - **Cross-type Dependencies:** Async initializers can now declare sync initializer dependencies.
 - **Per-initializer Dispatcher:** Each async initializer can specify its own `CoroutineDispatcher`.
 - **R8/ProGuard Rules:** Consumer keep rules are bundled — no manual configuration required.
+- **System Tracing:** `Startup::<phase>::<FQN>` slices, counters and markers on the system trace, viewable in Perfetto and measurable with Macrobenchmark (see [Observability](#observability-tracing--metrics)).
 
 ## Installation
 
@@ -239,7 +240,8 @@ coroutineScope.launch {
 
 `metricsFlow` is a hot `SharedFlow<StartupMetric>` that emits after each initializer completes
 (success or failure). All values are **replayed** — a collector that joins after startup finishes
-will still receive the full set of metrics from the startup sequence.
+will still receive the metrics from the startup sequence, up to the replay bound (see
+[Observability](#observability-tracing--metrics)).
 
 ```kotlin
 lifecycleScope.launch {
@@ -269,6 +271,12 @@ lifecycleScope.launch {
 | `threadName` | Thread `create()` actually ran on (empty for sync) |
 | `concurrentActiveCount` | Snapshot of how many async initializers were executing `create()` when this one started (always `0` for sync) |
 | `queueDelayMs` | Time from becoming ready to run to actually starting — concurrency-cap wait + dispatcher scheduling latency; the primary "coroutine storm" signal (always `0` for sync) |
+| `permitWaitMs` | Time spent waiting for the concurrency permit (`0` for sync or without a cap); `queueDelayMs - permitWaitMs` approximates dispatcher scheduling delay |
+| `startTimestampMs` / `endTimestampMs` | `SystemClock.uptimeMillis()` when `create()` started / ended; `0` when unknown (e.g. cancelled before `create()` started) |
+| `processStartOffsetMs` | Milliseconds from process start to `startTimestampMs` |
+| `priority` | Declared `StartupPriority` (sync initializers report `NORMAL`) |
+| `initializerFqn` | Fully-qualified class name; matches the trace section names |
+| `errorType` / `errorMessage` | Throwable class name and message of a failed `create()`; `null` on success and cancellation. Only strings are kept, never the throwable |
 
 > **Note:** Collect from a lifecycle-aware scope (e.g. `lifecycleScope`) to avoid retaining
 > UI references in the singleton.
@@ -332,6 +340,8 @@ class MyApplication : Application() {
 | `strictModeConcurrencyThreshold` | `Int` | `Runtime.getRuntime().availableProcessors()` | Concurrency level above which strict mode logs a warning (only when `strictModeCheckEnabled` is on) |
 | `firstFrameSignal` | `FirstFrameSignal?` | `null` | Optional injectable signal gating `DEFERRED` initializers. `null` uses the internal Android first-draw default; inject a fake to drive deferred scheduling under test |
 | `deferredStartupTimeoutMs` | `Long` | `5_000L` | Upper bound the deferred gate waits for the first frame before flushing `DEFERRED` work anyway (headless/no-UI fallback). Values `<= 0` flush immediately |
+| `metricsReplayCapacity` | `Int` | `256` | How many recent metrics `metricsFlow` replays to late collectors. Values `<= 0` use the default |
+| `dispatcherInstrumentationEnabled` | `Boolean` | `false` | Debug/measurement only: wraps each initializer's effective dispatcher to expose `dispatcherSnapshots()` (see [Observability](#observability-tracing--metrics)) |
 
 #### `SyncOrderingStrategy`
 
@@ -429,6 +439,102 @@ AppStartupInitializer.configure {
 }
 ```
 
+## Observability (Tracing & Metrics)
+
+### System trace sections
+
+The library writes `android.os.Trace` slices, so they show up in any system trace. Names follow
+`Startup::<phase>::<FQN>` (`<FQN>` is the initializer's fully-qualified class name; names are capped at
+127 characters by keeping the prefix and shortening the FQN from the left), so the wildcard `Startup::%`
+matches all of them. Sections are **sync** (thread slices) when the block cannot suspend and **async**
+(process-track slices, API 29+) when it can; on API < 29 only the sync ones are emitted.
+
+| Section | Kind | Meaning |
+|---|---|---|
+| `Startup::<FQN>` | sync / async | Whole initializer node (sync or async initializer) |
+| `Startup::discover::sync\|async` | sync | Reading manifest metadata and finding initializers |
+| `Startup::resolveGraph::topological\|validateRoots\|effectivePriorities` | sync | Dependency graph validation and priority resolution |
+| `Startup::instantiate::<FQN>` | sync | Reflective construction of the initializer |
+| `Startup::deps::<FQN>` | sync / async | Waiting for / resolving its dependencies |
+| `Startup::permitWait::<FQN>` | async | Waiting for a `maxConcurrentAsyncInitializers` permit |
+| `Startup::create::<FQN>` | sync / async | The `create()` body itself |
+| `Startup::lockWait::sync`, `Startup::lockWait::async::<FQN>` | sync / async | Waiting for the sync lock / async mutex that serializes initialization |
+| `Startup::awaitAll` | async | `awaitAllStartJobs()` / `onAppStartupLaunched` waiting for the critical path |
+| `Startup::onDemand::<FQN>` | sync / async | Public `initializeComponent` / `doInitialize` calls (startup-driven work is not wrapped) |
+| `Startup::deferred::awaitFirstFrame::<FQN>` | async | A `DEFERRED` initializer waiting for the first frame |
+| `Startup::marker::<state>` | zero-length | `IN_PROGRESS`, `COMPLETED`, `ERROR`, `cancel` (may repeat), `deferredSignal\|deferredTimeout::<FQN>`, `priorityInversion::<FQN>`, `strictModeConcurrency` |
+
+Counters (API 29+): `Startup::activeAsync` (async `create()` bodies running), `Startup::permitsWaiting`,
+`Startup::permitsAvailable` (concurrency cap) and `Startup::busSize` (metrics currently held for replay).
+
+**View them:** record a system trace and open it in [Perfetto](https://ui.perfetto.dev), the Android Studio
+profiler, or capture one from the command line with `android profiler systemtrace`, then search for `Startup::`.
+
+**Measure them:** Macrobenchmark can read the slices with `TraceSectionMetric("Startup::%")`, which matches
+both sync and async slices. Counters are not readable by `TraceSectionMetric` (slices only); check them in
+Perfetto. With `TraceSectionMetric.Mode.Sum` the wildcard double-counts nested and overlapping slices
+(a node contains its `create`, `awaitAll` overlaps), so use it only as a presence check and assert on
+specific section names or `Mode.Count`.
+
+> **Note on androidx.tracing 2:** it was evaluated and is **not integrated**; `android.os.Trace` remains the
+> only tracer and `:core` has no `androidx.tracing` dependency (CI guards the published POM). Without
+> `tracing-wire` in the app, tracing 2 emits nothing; with it, events go to a separate in-process Perfetto
+> file instead of the system trace, and adding `tracing-wire` changed Macrobenchmark cold-start results in
+> our test. It would also force `androidx.tracing`/`androidx.collection` upgrades on every consumer. A
+> pluggable tracer (separate artifact) may be considered in a future change.
+
+### Metrics
+
+Beyond the fields listed in [Metrics](#metrics), `metricsFlow` is bounded by
+`AppStartupConfig.metricsReplayCapacity` (default `256`). When exceeded, the oldest metrics are dropped
+first and emitters never suspend. The same bound applies to live collectors: there is no extra buffer, so a
+collector lagging by more than the capacity loses the oldest metrics (`DROP_OLDEST`). The drop warning is
+only logged when `debugLoggingEnabled` is `true`.
+
+### Dispatcher instrumentation (debug only)
+
+```kotlin
+AppStartupInitializer.configure {
+    dispatcherInstrumentationEnabled = BuildConfig.DEBUG
+}
+
+val snapshots = AppStartupInitializer.getInstance(context).dispatcherSnapshots()
+// label -> DispatcherSnapshot(peakConcurrency, maxQueueDelayMs, totalDispatched)
+```
+
+`StartupMetric.dispatcherName` then reports a stable label derived from the dispatcher (for example
+`Dispatchers.IO`). **Do not enable it in production:** wrapping `Dispatchers.IO` reduces its thread-pool
+elasticity and adds one `withContext` hop. It is `false` by default, in which case dispatchers are used
+unwrapped and `dispatcherSnapshots()` is empty.
+
+### Benchmarking
+
+The `:benchmark` module holds a Macrobenchmark (`StartupBenchmark`, cold start with `CompilationMode.None`
+and `Partial`, measuring TTID/TTFD plus `Startup::` sections) and a `BaselineProfileGenerator`. It targets the
+`benchmarkRelease` build type added to `:app` by the Baseline Profile plugin and needs a connected device:
+
+```bash
+./gradlew :benchmark:connectedBenchmarkReleaseAndroidTest
+```
+
+On an emulator the benchmark refuses to run unless you pass
+`-Pandroid.testInstrumentationRunnerArguments.androidx.benchmark.suppressErrors=EMULATOR`; emulator numbers
+only prove the wiring, not performance. To generate the sample's Baseline Profile on a connected device:
+
+```bash
+./gradlew :app:generateReleaseBaselineProfile
+```
+
+A profile generated on an emulator is fine for the sample; regenerate it on a physical device for production.
+
+### R8 / ProGuard
+
+The bundled consumer rules (`core/consumer-rules.pro`) are required for initializers that are only reached
+through another initializer's `dependencies()` and are not declared in the manifest, because they are
+instantiated by name. Manifest-declared initializers are also kept by AGP's aapt2 rules, so they do not prove
+the consumer rules work. CI builds the sample with R8 and runs `.github/scripts/check-r8-initializers.sh`,
+which asserts that a dependency-only initializer survives with its no-arg constructor and is not renamed.
+
 ## Migration from AndroidX App Startup to App Startup Extension
 
 If you are already using AndroidX App Startup, follow these steps to migrate to App Startup
@@ -499,6 +605,12 @@ Extension:
        override fun dependencies(): List<Class<out StartupSyncInitializer<*>>> = emptyList()
    }
    ```
+
+## Dependency changes
+
+The library no longer declares `androidx.appcompat:appcompat` and `com.google.android.material:material`
+(the library code never used them), so they are no longer transitive dependencies of your app. If your app
+relied on this library pulling them in, declare them yourself.
 
 ## Contributions
 
