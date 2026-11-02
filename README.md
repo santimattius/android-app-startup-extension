@@ -50,7 +50,7 @@ Then, add the dependency in your module-level `build.gradle` file:
 ```groovy
 dependencies {
     implementation("io.github.santimattius.android:app-startup-extension:${version}")
-
+}
 ```
 
 Replace `version` with the desired library version.
@@ -239,7 +239,7 @@ coroutineScope.launch {
 ### Metrics
 
 `metricsFlow` is a hot `SharedFlow<StartupMetric>` that emits after each initializer completes
-(success or failure). All values are **replayed** — a collector that joins after startup finishes
+(success or failure). Values are **replayed** (up to `metricsReplayCapacity`) — a collector that joins after startup finishes
 will still receive the metrics from the startup sequence, up to the replay bound (see
 [Observability](#observability-tracing--metrics)).
 
@@ -446,11 +446,13 @@ AppStartupInitializer.configure {
 The library writes `android.os.Trace` slices, so they show up in any system trace. Names follow
 `Startup::<phase>::<FQN>` (`<FQN>` is the initializer's fully-qualified class name; names are capped at
 127 characters by keeping the prefix and shortening the FQN from the left), so the wildcard `Startup::%`
-matches all of them. Sections are **sync** (thread slices) when the block cannot suspend and **async**
+matches all of them except the outer `StartupExtension` slice, which has no prefix. Sections are **sync** (thread slices) when the block cannot suspend and **async**
 (process-track slices, API 29+) when it can; on API < 29 only the sync ones are emitted.
 
 | Section | Kind | Meaning |
 |---|---|---|
+| `StartupExtension` | sync | Outer slice around the whole provider-driven discovery and initialization (does **not** match `Startup::%`) |
+| `Startup::getProviderInfo` | sync | The blocking `PackageManager.getProviderInfo` IPC call made at startup |
 | `Startup::<FQN>` | sync / async | Whole initializer node (sync or async initializer) |
 | `Startup::discover::sync\|async` | sync | Reading manifest metadata and finding initializers |
 | `Startup::resolveGraph::topological\|validateRoots\|effectivePriorities` | sync | Dependency graph validation and priority resolution |
@@ -479,11 +481,12 @@ specific section names or `Mode.Count`.
 > **Note on androidx.tracing 2:** it was evaluated and is **not integrated**; `android.os.Trace` remains the
 > only tracer and `:core` has no `androidx.tracing` dependency (CI guards the published POM). Without
 > `tracing-wire` in the app, tracing 2 emits nothing; with it, events go to a separate in-process Perfetto
-> file instead of the system trace, and adding `tracing-wire` changed Macrobenchmark cold-start results in
-> our test. It would also force `androidx.tracing`/`androidx.collection` upgrades on every consumer. A
-> pluggable tracer (separate artifact) may be considered in a future change.
+> file instead of the system trace. In our test (API 35 emulator only) adding `tracing-wire` turned the
+> Macrobenchmark cold start into a warm start; the cause is inferred, not isolated. It would also force
+> `androidx.tracing`/`androidx.collection` upgrades for consumers that resolve older versions transitively
+> (strict version pins were not tested). A pluggable tracer (separate artifact) may be considered in a future change.
 
-### Metrics
+### Metrics reference
 
 Beyond the fields listed in [Metrics](#metrics), `metricsFlow` is bounded by
 `AppStartupConfig.metricsReplayCapacity` (default `256`). When exceeded, the oldest metrics are dropped
@@ -499,7 +502,7 @@ AppStartupInitializer.configure {
 }
 
 val snapshots = AppStartupInitializer.getInstance(context).dispatcherSnapshots()
-// label -> DispatcherSnapshot(peakConcurrency, maxQueueDelayMs, totalDispatched)
+// label -> DispatcherSnapshot(label, peakConcurrency, maxQueueDelayMs, totalDispatched)
 ```
 
 `StartupMetric.dispatcherName` then reports a stable label derived from the dispatcher (for example
@@ -533,7 +536,8 @@ The bundled consumer rules (`core/consumer-rules.pro`) are required for initiali
 through another initializer's `dependencies()` and are not declared in the manifest, because they are
 instantiated by name. Manifest-declared initializers are also kept by AGP's aapt2 rules, so they do not prove
 the consumer rules work. CI builds the sample with R8 and runs `.github/scripts/check-r8-initializers.sh`,
-which asserts that a dependency-only initializer survives with its no-arg constructor and is not renamed.
+which asserts that the library's `InitializationProvider`, the two manifest-declared sample initializers and
+a dependency-only initializer survive with their no-arg constructors and are not renamed.
 
 ## Migration from AndroidX App Startup to App Startup Extension
 
