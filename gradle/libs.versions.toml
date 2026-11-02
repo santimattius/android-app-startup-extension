@@ -7,8 +7,6 @@ coreKtx = "1.19.1"
 lifecycleRuntimeKtx = "2.11.0"
 activityCompose = "1.13.0"
 composeBom = "2026.09.00"
-appcompat = "1.8.0"
-material = "1.14.0"
 
 junit = "4.13.2"
 junitVersion = "1.3.0"
@@ -41,8 +39,6 @@ androidx-material3 = { group = "androidx.compose.material3", name = "material3" 
 androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profileinstaller", version.ref = "profileinstaller" }
 androidx-benchmark-macro-junit4 = { group = "androidx.benchmark", name = "benchmark-macro-junit4", version.ref = "benchmarkMacro" }
 androidx-uiautomator = { group = "androidx.test.uiautomator", name = "uiautomator", version.ref = "uiautomator" }
-androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
-material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 
 [plugins]
 androidx-baselineprofile = { id = "androidx.baselineprofile", version.ref = "benchmarkMacro" }
