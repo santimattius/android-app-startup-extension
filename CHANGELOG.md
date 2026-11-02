@@ -72,6 +72,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Each initializer class is now instantiated once per startup (graph passes no longer create
   throwaway instances).
 
+### Removed
+
+- The library no longer declares `androidx.appcompat:appcompat` and `com.google.android.material:material`
+  (the library code never used them). They are no longer transitive dependencies of consumers;
+  apps that relied on this library pulling them in must declare their own dependency.
+
 ## [2.2.0] — 2026-07-14
 
 ### Added
