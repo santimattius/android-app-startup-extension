@@ -30,6 +30,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.TimeUnit
 
 /** Spec: startup-async-tracing P3 markers (tasks 4.7-4.8): transitions, cancel, warnings. */
@@ -78,6 +79,23 @@ class TraceMarkersTest {
 
         assertTrue(thrown is IllegalStateException)
         assertEquals(listOf("Startup::marker::IN_PROGRESS", "Startup::marker::ERROR"), markers())
+    }
+
+    @Test
+    fun `concurrent launches record the IN_PROGRESS marker exactly once`() {
+        val callers = 8
+        repeat(300) { round ->
+            tracer.events.clear()
+            val engine = AppStartupCoroutinesEngine(Dispatchers.Default, tracer = tracer)
+            val start = CyclicBarrier(callers)
+            val threads = (1..callers).map {
+                Thread { start.await(5, TimeUnit.SECONDS); engine.launchStartJob { } }.also { t -> t.start() }
+            }
+            threads.forEach { it.join(5_000) }
+
+            assertEquals("round $round", 1, markers().count { it == "Startup::marker::IN_PROGRESS" })
+            engine.cancel()
+        }
     }
 
     @Test

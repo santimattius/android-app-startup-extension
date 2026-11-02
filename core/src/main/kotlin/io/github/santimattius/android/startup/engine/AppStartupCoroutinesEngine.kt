@@ -21,6 +21,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.CoroutineContext
@@ -110,8 +111,7 @@ internal class AppStartupCoroutinesEngine(
 
     /** Publishes [state] and, only on an actual transition, records a zero-length marker. */
     private fun transitionTo(state: StartupState) {
-        if (_startupState.value == state) return
-        _startupState.value = state
+        if (_startupState.getAndUpdate { state } == state) return
         tracer.mark { StartupTraceNames.of("marker::${state.name}", null) }
     }
 
