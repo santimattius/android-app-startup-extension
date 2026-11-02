@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.test)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.androidx.baselineprofile)
 }
 
 val androidMinSdkVersion: String by project
@@ -20,17 +21,11 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    // The target is the release-like, profileable `benchmark` build of :app.
+    // The baselineprofile plugin maps this module's `benchmarkRelease` variant to the
+    // release-like (minified, non-debuggable) `benchmarkRelease` build type it adds to :app.
     targetProjectPath = ":app"
     experimentalProperties["android.experimental.self-instrumenting"] = true
 
-    buildTypes {
-        create("benchmark") {
-            isDebuggable = true
-            signingConfig = signingConfigs.getByName("debug")
-            matchingFallbacks += "release"
-        }
-    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -43,7 +38,7 @@ dependencies {
     implementation(libs.androidx.uiautomator)
 }
 
-androidComponents {
-    // Only the `benchmark` variant is meaningful; skip debug/release test variants.
-    beforeVariants(selector().all()) { it.enable = it.buildType == "benchmark" }
+baselineProfile {
+    // Generate on the connected device/emulator (no Gradle Managed Device).
+    useConnectedDevices = true
 }
