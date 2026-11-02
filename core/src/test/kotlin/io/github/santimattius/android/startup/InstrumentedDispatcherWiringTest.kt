@@ -16,6 +16,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
@@ -121,7 +123,8 @@ class InstrumentedDispatcherWiringTest {
         initializer.discoverAndInitialize(InitializationProvider::class.java)
         runCatching { runBlocking { initializer.awaitAllStartJobs() } }
 
-        val metrics = initializer.metricsFlow.replayCache.associateBy { it.initializerName }
+        // awaitAllStartJobs() fails fast on the first failure, so the sibling may still be running.
+        val metrics = awaitMetrics(initializer, "FailingInit", "PlainInit")
         assertFalse(metrics.getValue("FailingInit").success)
         assertNotNull(metrics.getValue("FailingInit").errorType)
         assertTrue(metrics.getValue("PlainInit").success)
@@ -129,6 +132,36 @@ class InstrumentedDispatcherWiringTest {
         assertTrue(snapshot.peakConcurrency >= 1)
         assertTrue(snapshot.totalDispatched >= 2)
     }
+
+    @Test
+    fun `a slow sibling metric is still recorded after the failing await returned`() {
+        AppStartupInitializer.configure {
+            defaultAsyncDispatcher = configDispatcher
+            dispatcherInstrumentationEnabled = true
+        }
+        val initializer = AppStartupInitializer(context)
+        stubManifest(FailingInit::class.java, GatedInit::class.java)
+
+        initializer.discoverAndInitialize(InitializationProvider::class.java)
+        val awaitResult = runCatching { runBlocking { initializer.awaitAllStartJobs() } }
+
+        // GatedInit is blocked on the gate, so the await can only have returned through the failure.
+        assertTrue(awaitResult.isFailure)
+        assertFalse(initializer.metricsFlow.replayCache.any { it.initializerName == "GatedInit" })
+        gate.countDown()
+        val metrics = awaitMetrics(initializer, "FailingInit", "GatedInit")
+        assertFalse(metrics.getValue("FailingInit").success)
+        assertTrue(metrics.getValue("GatedInit").success)
+    }
+
+    /** Waits (replay-aware, so it returns at once when already emitted) for every named initializer metric. */
+    private fun awaitMetrics(initializer: AppStartupInitializer, vararg names: String): Map<String, StartupMetric> =
+        runBlocking {
+            withTimeout(5_000) {
+                names.forEach { name -> initializer.metricsFlow.first { it.initializerName == name } }
+            }
+            initializer.metricsFlow.replayCache.associateBy { it.initializerName }
+        }
 
     @Test
     fun `cap of 1 separates semaphore wait from dispatcher queue with instrumentation on`() {
@@ -323,6 +356,14 @@ class InstrumentedDispatcherWiringTest {
 
     private class OverrideInit : Recording() {
         override fun dispatcher(): CoroutineDispatcher = overrideDispatcher
+    }
+
+    /** Stays running until the test opens the gate, modelling a sibling that outlives the failing await. */
+    private class GatedInit : StartupAsyncInitializer<String> {
+        override suspend fun create(context: Context): String {
+            gate.await(5, TimeUnit.SECONDS)
+            return "gated"
+        }
     }
 
     private class FailingInit : StartupAsyncInitializer<String> {
