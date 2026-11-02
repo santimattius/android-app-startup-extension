@@ -17,6 +17,7 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -100,6 +101,34 @@ class TraceCountersTest {
         assertTrue("held permit shows 0 available", 0L in available)
         assertEquals(1L, available.max())
         assertEquals(1L, available.last())
+    }
+
+    @Test
+    fun `callers that acquire a free permit are never counted as waiting`() = runBlocking {
+        val engine = AppStartupCoroutinesEngine(Dispatchers.IO, cap = 2, tracer = tracer)
+
+        engine.acquireAsyncPermit()
+        engine.acquireAsyncPermit()
+
+        assertTrue("no caller waited, so permitsWaiting must never be emitted", values("Startup::permitsWaiting").isEmpty())
+        assertEquals(listOf(1L, 0L), values("Startup::permitsAvailable"))
+    }
+
+    @Test
+    fun `cancelling a waiting caller returns permitsWaiting to zero and keeps the permits consistent`() = runBlocking {
+        val engine = AppStartupCoroutinesEngine(Dispatchers.IO, cap = 1, tracer = tracer)
+        engine.acquireAsyncPermit()
+        val waiter = async(Dispatchers.IO) { engine.acquireAsyncPermit() }
+        withTimeout(5_000) { while (1L !in values("Startup::permitsWaiting")) delay(5) }
+
+        waiter.cancelAndJoin()
+
+        assertEquals("the decrement must happen in finally", listOf(1L, 0L), values("Startup::permitsWaiting"))
+        assertEquals("the cancelled caller never owned a permit", listOf(0L), values("Startup::permitsAvailable"))
+        engine.releaseAsyncPermit()
+        engine.acquireAsyncPermit()
+        assertEquals(listOf(0L, 1L, 0L), values("Startup::permitsAvailable"))
+        assertEquals("the freed permit is acquired without waiting", listOf(1L, 0L), values("Startup::permitsWaiting"))
     }
 
     @Test
