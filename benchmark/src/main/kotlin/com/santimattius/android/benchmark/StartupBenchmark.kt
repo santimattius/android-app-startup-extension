@@ -12,7 +12,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Cold-start benchmark of the sample (`benchmark` build: minified, non-debuggable, profileable).
+ * Cold-start benchmark of the sample (`benchmarkRelease` build type added by the baselineprofile plugin: minified, non-debuggable, profileable).
  *
  * Reports TTID/TTFD (`StartupTimingMetric`; TTFD needs the sample's `reportFullyDrawn`) and the
  * library's `Startup::` trace sections. Emulator numbers are not valid performance data: run on
