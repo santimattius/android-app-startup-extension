@@ -63,9 +63,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Startup::busSize`; slices `Startup::lockWait::sync`, `Startup::lockWait::async::<FQN>` and `Startup::awaitAll`.
   Public `initializeComponent`/`doInitialize` calls are wrapped in `Startup::onDemand::<FQN>`; startup-driven
   initialization (including sync dependencies of async initializers) is not.
-- Zero-length trace markers `Startup::marker::IN_PROGRESS|COMPLETED|ERROR` (startup state transitions),
-  `Startup::marker::cancel`, `Startup::marker::priorityInversion::<FQN>` and `Startup::marker::strictModeConcurrency`,
-  emitted once per occurrence. They never change behavior and are skipped when tracing is disabled.
+- Zero-length trace markers `Startup::marker::IN_PROGRESS|COMPLETED|ERROR` (engine-global startup state
+  transitions, emitted only on a real change; not per-initializer), `Startup::marker::cancel`,
+  `Startup::marker::priorityInversion::<FQN>` and `Startup::marker::strictModeConcurrency`. The `cancel` marker is
+  emitted by `cancel()` and also whenever `awaitAllStartJobs` catches a `CancellationException` (including its
+  timeout), so it may appear more than once; a single cancelled initializer emits none. The warning markers are
+  emitted once per occurrence. Markers never change behavior and are skipped when tracing is disabled.
 - Each initializer class is now instantiated once per startup (graph passes no longer create
   throwaway instances).
 
