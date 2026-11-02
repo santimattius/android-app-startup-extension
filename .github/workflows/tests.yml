@@ -80,3 +80,15 @@ jobs:
           name: r8-config-analyzer
           path: app/build/reports/r8
           if-no-files-found: warn
+
+      - name: Upload R8 outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: r8-outputs
+          path: |
+            app/build/outputs/mapping/release/seeds.txt
+            app/build/outputs/mapping/release/mapping.txt
+            app/build/outputs/mapping/release/usage.txt
+            app/build/outputs/mapping/release/configuration.txt
+          if-no-files-found: warn
