@@ -2,6 +2,7 @@ package com.santimattius.android.sample
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.ReportDrawn
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
@@ -29,6 +30,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             SampleTheme {
                 MainScreen()
+                // The sample's content is static, so first composition means "data ready".
+                // ReportDrawn defers to the activity's FullyDrawnReporter, which calls
+                // reportFullyDrawn() once (enables TTFD in Macrobenchmark / Perfetto).
+                ReportDrawn()
             }
         }
     }
