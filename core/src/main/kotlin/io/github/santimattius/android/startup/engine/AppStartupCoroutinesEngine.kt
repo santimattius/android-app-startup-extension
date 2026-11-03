@@ -2,6 +2,8 @@ package io.github.santimattius.android.startup.engine
 
 import android.util.Log
 import io.github.santimattius.android.startup.StartupState
+import io.github.santimattius.android.startup.trace.StartupTracer
+import io.github.santimattius.android.startup.trace.SystemStartupTracer
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
@@ -54,6 +56,7 @@ import kotlin.coroutines.CoroutineContext
 internal class AppStartupCoroutinesEngine(
     coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val cap: Int? = null,
+    private val tracer: StartupTracer = SystemStartupTracer,
 ) : CoroutineScope {
 
     private val dispatcher: CoroutineDispatcher = coroutineDispatcher
@@ -91,6 +94,16 @@ internal class AppStartupCoroutinesEngine(
     /** Backs [acquireAsyncPermit]/[releaseAsyncPermit]. `null` when [cap] is `null` (unbounded). */
     private val semaphore: Semaphore? = cap?.let(::Semaphore)
 
+    /** Callers currently suspended in [acquireAsyncPermit]; only used for the trace counter. */
+    private val permitsWaiting = AtomicInteger(0)
+
+    /** Serializes read+emit so a stale counter value can never be recorded after a newer one. */
+    private val counterLock = Any()
+
+    private inline fun emitCounter(name: String, value: () -> Int) {
+        if (tracer.isAsyncEnabled) synchronized(counterLock) { tracer.setCounter(name, value().toLong()) }
+    }
+
     fun <T> launchStartJob(block: suspend CoroutineScope.() -> T) {
         _startupState.value = StartupState.IN_PROGRESS
         _startJobs.add(async { block() })
@@ -121,11 +134,12 @@ internal class AppStartupCoroutinesEngine(
      * @return the active count immediately after this increment — the concurrency snapshot
      *   to attach to the corresponding `StartupMetric`.
      */
-    fun enterActive(): Int = activeAsync.incrementAndGet()
+    fun enterActive(): Int = activeAsync.incrementAndGet().also { emitCounter(ACTIVE_ASYNC) { activeAsync.get() } }
 
     /** Decrements the active-async counter. Must be paired with a prior [enterActive] call. */
     fun exitActive() {
         activeAsync.decrementAndGet()
+        emitCounter(ACTIVE_ASYNC) { activeAsync.get() }
     }
 
     /**
@@ -135,12 +149,25 @@ internal class AppStartupCoroutinesEngine(
      * Must be paired with a matching [releaseAsyncPermit] call in a `finally` block.
      */
     suspend fun acquireAsyncPermit() {
-        semaphore?.acquire()
+        val semaphore = semaphore ?: return
+        if (!semaphore.tryAcquire()) {
+            permitsWaiting.incrementAndGet()
+            emitCounter(PERMITS_WAITING) { permitsWaiting.get() }
+            try {
+                semaphore.acquire()
+            } finally {
+                permitsWaiting.decrementAndGet()
+                emitCounter(PERMITS_WAITING) { permitsWaiting.get() }
+            }
+        }
+        emitCounter(PERMITS_AVAILABLE) { semaphore.availablePermits }
     }
 
     /** Releases a permit previously obtained via [acquireAsyncPermit]. No-op when [cap] is `null`. */
     fun releaseAsyncPermit() {
-        semaphore?.release()
+        val semaphore = semaphore ?: return
+        semaphore.release()
+        emitCounter(PERMITS_AVAILABLE) { semaphore.availablePermits }
     }
 
     suspend fun awaitAllStartJobs() {
@@ -194,5 +221,8 @@ internal class AppStartupCoroutinesEngine(
     companion object {
         const val TAG = "[CoroutinesEngine]"
         const val EXTENSION_NAME = "AppStartupCoroutinesEngine"
+        private const val ACTIVE_ASYNC = "Startup::activeAsync"
+        private const val PERMITS_WAITING = "Startup::permitsWaiting"
+        private const val PERMITS_AVAILABLE = "Startup::permitsAvailable"
     }
 }

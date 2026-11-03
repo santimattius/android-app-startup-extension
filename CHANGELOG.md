@@ -59,6 +59,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - New trace sections `Startup::discover::sync|async`, `Startup::resolveGraph::topological|validateRoots|effectivePriorities`
   (main thread), `Startup::instantiate::<FQN>` and, for deferred initializers, an async
   `Startup::deferred::awaitFirstFrame::<FQN>` slice followed by a `Startup::marker::deferredSignal|deferredTimeout::<FQN>` marker.
+- New trace counters (API 29+) `Startup::activeAsync`, `Startup::permitsWaiting`, `Startup::permitsAvailable` and
+  `Startup::busSize`.
 - Each initializer class is now instantiated once per startup (graph passes no longer create
   throwaway instances).
 

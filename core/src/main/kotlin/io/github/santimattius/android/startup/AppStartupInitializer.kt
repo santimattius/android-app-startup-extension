@@ -72,9 +72,10 @@ class AppStartupInitializer internal constructor(
     internal val coroutinesEngine = AppStartupCoroutinesEngine(
         coroutineDispatcher ?: Dispatchers.Default,
         cap = config.maxConcurrentAsyncInitializers,
+        tracer = tracer,
     )
 
-    private val metricsBus = StartupMetricsBus(config.metricsReplayCapacity)
+    private val metricsBus = StartupMetricsBus(config.metricsReplayCapacity, tracer)
 
     private val dispatcherInstrumentation = DispatcherInstrumentation()
 
