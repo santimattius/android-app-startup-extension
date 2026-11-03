@@ -72,6 +72,7 @@ class AppStartupConfig private constructor(
     val firstFrameSignal: FirstFrameSignal?,
     val deferredStartupTimeoutMs: Long,
     val metricsReplayCapacity: Int,
+    val dispatcherInstrumentationEnabled: Boolean,
 ) {
     class Builder {
         var strictModeCheckEnabled: Boolean = false
@@ -131,6 +132,23 @@ class AppStartupConfig private constructor(
          */
         var metricsReplayCapacity: Int = DEFAULT_METRICS_REPLAY_CAPACITY
 
+        /**
+         * Opt-in, **debug/measurement only**. When `true`, the effective dispatcher of each async
+         * initializer (per-instance `dispatcher()` > [defaultAsyncDispatcher] > `Dispatchers.Default`)
+         * is wrapped once in a measuring dispatcher. Per-dispatcher peak concurrency, max queue delay and
+         * dispatch count are then available from [AppStartupInitializer.dispatcherSnapshots], and
+         * [StartupMetric.dispatcherName] reports a readable label derived from the dispatcher
+         * (`toString()` without identity hash, bracketed pool statistics and package prefix, e.g.
+         * `ThreadPoolExecutor`, `Dispatchers.IO`), so it is stable across runs. Distinct dispatchers that
+         * derive the same label get a `#n` suffix. There is no way to set a custom label.
+         * Global dispatchers are never altered, only the library's own dispatch is measured.
+         *
+         * Warning: wrapping `Dispatchers.IO` reduces its thread-pool elasticity and `withContext` no
+         * longer takes the same-dispatcher fast path (one extra hop). Do not enable in production.
+         * Defaults to `false`: dispatchers are used unwrapped and no snapshot data exists.
+         */
+        var dispatcherInstrumentationEnabled: Boolean = false
+
         internal fun build() = AppStartupConfig(
             strictModeCheckEnabled = strictModeCheckEnabled,
             debugLoggingEnabled = debugLoggingEnabled,
@@ -142,6 +160,7 @@ class AppStartupConfig private constructor(
             firstFrameSignal = firstFrameSignal,
             deferredStartupTimeoutMs = deferredStartupTimeoutMs,
             metricsReplayCapacity = metricsReplayCapacity.takeIf { it > 0 } ?: DEFAULT_METRICS_REPLAY_CAPACITY,
+            dispatcherInstrumentationEnabled = dispatcherInstrumentationEnabled,
         )
     }
 

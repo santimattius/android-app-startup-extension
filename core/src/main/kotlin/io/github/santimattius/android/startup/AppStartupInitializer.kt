@@ -11,6 +11,8 @@ import android.os.StrictMode
 import android.os.SystemClock
 import android.os.Trace
 import android.util.Log
+import io.github.santimattius.android.startup.dispatcher.DispatcherInstrumentation
+import io.github.santimattius.android.startup.dispatcher.DispatcherSnapshot
 import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
@@ -72,6 +74,14 @@ class AppStartupInitializer internal constructor(
     )
 
     private val metricsBus = StartupMetricsBus(config.metricsReplayCapacity)
+
+    private val dispatcherInstrumentation = DispatcherInstrumentation()
+
+    /**
+     * Per-dispatcher counters keyed by label. Empty unless
+     * [AppStartupConfig.Builder.dispatcherInstrumentationEnabled] is `true` (debug/measurement only).
+     */
+    fun dispatcherSnapshots(): Map<String, DispatcherSnapshot> = dispatcherInstrumentation.snapshots()
 
     /**
      * Hot [SharedFlow] that emits a [StartupMetric] after each initializer completes,
@@ -429,8 +439,14 @@ class AppStartupInitializer internal constructor(
                     }
 
                     StartupExtensionLogger.info { "Initializing ${component.name}" }
-                    val effectiveDispatcher =
+                    val resolvedDispatcher =
                         asyncInitializer.dispatcher() ?: config.defaultAsyncDispatcher
+                    val effectiveDispatcher: CoroutineDispatcher =
+                        if (config.dispatcherInstrumentationEnabled) {
+                            dispatcherInstrumentation.wrap(resolvedDispatcher)
+                        } else {
+                            resolvedDispatcher
+                        }
 
                     // Dependencies are fully resolved above (deps + syncDependencies), so this clock
                     // starts AFTER dependency resolution and BEFORE the concurrency permit is
@@ -442,6 +458,7 @@ class AppStartupInitializer internal constructor(
                     tracer.asyncSection({ StartupTraceNames.of("permitWait", component.name) }) {
                         coroutinesEngine.acquireAsyncPermit()
                     }
+                    val permitWaitMs = (System.nanoTime() - requestedNs) / 1_000_000L
                     val activeSnapshot = coroutinesEngine.enterActive()
                     maybeWarnStrictModeConcurrency(activeSnapshot, effectiveDispatcher)
 
@@ -449,11 +466,13 @@ class AppStartupInitializer internal constructor(
                     var wasCancelled = false
                     var failure: Throwable? = null
                     var startedNs = requestedNs
+                    var bodyStarted = false
                     var startedUptimeMs = 0L
                     var executionThreadName = ""
                     try {
                         val result = withContext(effectiveDispatcher) {
                             startedNs = System.nanoTime()
+                            bodyStarted = true
                             startedUptimeMs = SystemClock.uptimeMillis()
                             executionThreadName = Thread.currentThread().name
                             tracer.asyncSection({ StartupTraceNames.of("create", component.name) }) {
@@ -472,7 +491,11 @@ class AppStartupInitializer internal constructor(
                     } finally {
                         coroutinesEngine.exitActive()
                         coroutinesEngine.releaseAsyncPermit()
-                        val durationMs = (System.nanoTime() - startedNs) / 1_000_000L
+                        val finishedNs = System.nanoTime()
+                        val durationMs = (finishedNs - startedNs) / 1_000_000L
+                        // A body that never started (cancelled while queued) has no start instant, so the
+                        // queue delay runs up to the cancellation. This keeps queueDelayMs >= permitWaitMs.
+                        val queueDelayMs = ((if (bodyStarted) startedNs else finishedNs) - requestedNs) / 1_000_000L
                         metricsBus.publish(
                             StartupMetric(
                                 initializerName = component.simpleName,
@@ -483,7 +506,7 @@ class AppStartupInitializer internal constructor(
                                 dispatcherName = effectiveDispatcher.toString(),
                                 threadName = executionThreadName,
                                 concurrentActiveCount = activeSnapshot,
-                                queueDelayMs = (startedNs - requestedNs) / 1_000_000L,
+                                queueDelayMs = queueDelayMs,
                                 startTimestampMs = startedUptimeMs,
                                 // 0 (unknown) when the body never started, e.g. cancelled while queued.
                                 endTimestampMs = if (startedUptimeMs == 0L) 0L else startedUptimeMs + durationMs,
@@ -492,6 +515,7 @@ class AppStartupInitializer internal constructor(
                                 initializerFqn = component.name,
                                 errorType = failure?.javaClass?.name,
                                 errorMessage = failure?.message,
+                                permitWaitMs = permitWaitMs,
                             )
                         )
                     }
