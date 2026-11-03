@@ -9,6 +9,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Trace section names now use the fully-qualified class name (`Startup::<FQN>` instead of the simple
+  name) and the initializer node section is an async slice, so it is balanced across thread hops.
+  Names longer than 127 chars keep the `Startup::<phase>::` prefix and shorten the FQN from the left.
+- New trace sections `Startup::deps::<FQN>`, `Startup::permitWait::<FQN>` and `Startup::create::<FQN>`.
+- Each initializer class is now instantiated once per startup (graph passes no longer create
+  throwaway instances).
+
 ## [2.2.0] — 2026-07-14
 
 ### Added

@@ -12,6 +12,15 @@ import android.util.Log
 import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
+import io.github.santimattius.android.startup.trace.StartupTraceNames
+import io.github.santimattius.android.startup.trace.StartupTracer
+import io.github.santimattius.android.startup.trace.SystemStartupTracer
+import io.github.santimattius.android.startup.trace.asyncSection
+import io.github.santimattius.android.startup.trace.closeAsyncSection
+import io.github.santimattius.android.startup.trace.closeSection
+import io.github.santimattius.android.startup.trace.openAsyncSection
+import io.github.santimattius.android.startup.trace.openSection
+import io.github.santimattius.android.startup.trace.section
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
@@ -49,8 +58,11 @@ import kotlin.concurrent.Volatile
  */
 class AppStartupInitializer internal constructor(
     context: Context,
-    coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
+    coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val tracer: StartupTracer = SystemStartupTracer,
 ) {
+
+    private val registry = InitializerRegistry()
 
     internal val coroutinesEngine = AppStartupCoroutinesEngine(
         coroutineDispatcher ?: Dispatchers.Default,
@@ -280,7 +292,7 @@ class AppStartupInitializer internal constructor(
         component: Class<out StartupSyncInitializer<*>>,
         initializing: MutableSet<Class<*>>
     ): T {
-        Trace.beginSection("$TRACE_PREFIX${component.simpleName}")
+        val nodeOpened = tracer.openSection { StartupTraceNames.of(null, component.name) }
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
@@ -289,15 +301,15 @@ class AppStartupInitializer internal constructor(
                 requireConcreteClass(component)
                 initializing.add(component)
                 try {
-                    val initializer =
-                        component.getDeclaredConstructor()
-                            .newInstance() as StartupSyncInitializer<*>
+                    val initializer = registry.take(component) as StartupSyncInitializer<*>
 
                     shouldRetain = initializer.retainAfterStartup()
 
-                    initializer.dependencies()
-                        .filterNot { initialized.containsKey(it) }
-                        .forEach { doInitialize<Any>(it, initializing) }
+                    tracer.section({ StartupTraceNames.of("deps", component.name) }) {
+                        initializer.dependencies()
+                            .filterNot { initialized.containsKey(it) }
+                            .forEach { doInitialize<Any>(it, initializing) }
+                    }
 
                     StartupExtensionLogger.info("Initializing ${component.name}")
                     val startNs = System.nanoTime()
@@ -317,7 +329,9 @@ class AppStartupInitializer internal constructor(
                         }
                     } else null
                     try {
-                        val result = initializer.create(applicationContext)
+                        val result = tracer.section({ StartupTraceNames.of("create", component.name) }) {
+                            initializer.create(applicationContext)
+                        }
                         success = true
                         StartupExtensionLogger.info("Initialized ${component.name}")
                         result
@@ -341,7 +355,7 @@ class AppStartupInitializer internal constructor(
             if (!shouldRetain) initialized.remove(component)
             return result
         } finally {
-            Trace.endSection()
+            tracer.closeSection(nodeOpened)
         }
     }
 
@@ -364,7 +378,9 @@ class AppStartupInitializer internal constructor(
         component: Class<out StartupAsyncInitializer<*>>,
         initializing: MutableSet<Class<*>>
     ): T {
-        Trace.beginSection("$TRACE_PREFIX${component.simpleName}")
+        // Async slice: this node can suspend and resume on another thread, so a thread-bound
+        // Trace.beginSection would corrupt the stack. The cookie is captured at begin.
+        val nodeSpan = tracer.openAsyncSection { StartupTraceNames.of(null, component.name) }
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
 
@@ -373,22 +389,23 @@ class AppStartupInitializer internal constructor(
                 requireConcreteClass(component)
                 initializing.add(component)
                 try {
-                    val initializer = component.getDeclaredConstructor()
-                        .newInstance()
+                    val initializer = registry.take(component)
                         .also { it as StartupAsyncInitializer<*> }
 
                     val asyncInitializer = (initializer as StartupAsyncInitializer<*>)
                     shouldRetain = asyncInitializer.retainAfterStartup()
 
-                    asyncInitializer.dependencies()
-                        .filterNot(initialized::containsKey)
-                        .forEach { doAsyncInitialize<Any>(it, initializing) }
+                    tracer.asyncSection({ StartupTraceNames.of("deps", component.name) }) {
+                        asyncInitializer.dependencies()
+                            .filterNot(initialized::containsKey)
+                            .forEach { doAsyncInitialize<Any>(it, initializing) }
 
-                    // Resolve cross-type dependencies: sync initializers that must complete
-                    // before this async initializer's create() is invoked.
-                    asyncInitializer.syncDependencies()
-                        .filterNot(initialized::containsKey)
-                        .forEach { doInitialize<Any>(it) }
+                        // Resolve cross-type dependencies: sync initializers that must complete
+                        // before this async initializer's create() is invoked.
+                        asyncInitializer.syncDependencies()
+                            .filterNot(initialized::containsKey)
+                            .forEach { doInitialize<Any>(it) }
+                    }
 
                     StartupExtensionLogger.info("Initializing ${component.name}")
                     val effectiveDispatcher =
@@ -401,7 +418,9 @@ class AppStartupInitializer internal constructor(
                     // not around dependency resolution, so a parent never holds a permit while waiting
                     // on a child's permit — no deadlock even at cap=1 (ADR-2).
                     val requestedNs = System.nanoTime()
-                    coroutinesEngine.acquireAsyncPermit()
+                    tracer.asyncSection({ StartupTraceNames.of("permitWait", component.name) }) {
+                        coroutinesEngine.acquireAsyncPermit()
+                    }
                     val activeSnapshot = coroutinesEngine.enterActive()
                     maybeWarnStrictModeConcurrency(activeSnapshot, effectiveDispatcher)
 
@@ -413,7 +432,9 @@ class AppStartupInitializer internal constructor(
                         val result = withContext(effectiveDispatcher) {
                             startedNs = System.nanoTime()
                             executionThreadName = Thread.currentThread().name
-                            asyncInitializer.create(applicationContext)
+                            tracer.asyncSection({ StartupTraceNames.of("create", component.name) }) {
+                                asyncInitializer.create(applicationContext)
+                            }
                         }
                         success = true
                         StartupExtensionLogger.info("Initialized ${component.name}")
@@ -453,7 +474,7 @@ class AppStartupInitializer internal constructor(
             if (!shouldRetain) initialized.remove(component)
             return result
         } finally {
-            Trace.endSection()
+            tracer.closeAsyncSection(nodeSpan)
         }
     }
 
@@ -525,7 +546,7 @@ class AppStartupInitializer internal constructor(
             inDegree.getOrPut(cls) { 0 }
             adjacency.getOrPut(cls) { mutableListOf() }
 
-            cls.getDeclaredConstructor().newInstance()
+            registry.peek(cls)
                 .let { it as StartupSyncInitializer<*> }
                 .dependencies()
                 .filter { it in discovered }
@@ -671,7 +692,7 @@ class AppStartupInitializer internal constructor(
             inDegree.getOrPut(cls) { 0 }
             adjacency.getOrPut(cls) { mutableListOf() }
 
-            cls.getDeclaredConstructor().newInstance()
+            registry.peek(cls)
                 .let { it as StartupAsyncInitializer<*> }
                 .dependencies()
                 .filter { it in discovered }
@@ -734,7 +755,7 @@ class AppStartupInitializer internal constructor(
         val dependents = mutableMapOf<Class<out StartupAsyncInitializer<*>>, MutableList<Class<out StartupAsyncInitializer<*>>>>()
 
         discovered.forEach { cls ->
-            val initializer = cls.getDeclaredConstructor().newInstance() as StartupAsyncInitializer<*>
+            val initializer = registry.peek(cls) as StartupAsyncInitializer<*>
             declared[cls] = initializer.priority()
             initializer.dependencies()
                 .filter { it in discovered }
@@ -835,7 +856,6 @@ class AppStartupInitializer internal constructor(
         private const val KEY_SYNC_INITIALIZER = "sync-initializer"
         private const val KEY_ASYNC_INITIALIZER = "async-initializer"
         private const val SECTION_NAME = "StartupExtension"
-        private const val TRACE_PREFIX = "Startup::"
         private const val TRACE_PROVIDER_INFO = "Startup::getProviderInfo"
 
         @Volatile
