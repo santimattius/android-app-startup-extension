@@ -60,7 +60,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (main thread), `Startup::instantiate::<FQN>` and, for deferred initializers, an async
   `Startup::deferred::awaitFirstFrame::<FQN>` slice followed by a `Startup::marker::deferredSignal|deferredTimeout::<FQN>` marker.
 - New trace counters (API 29+) `Startup::activeAsync`, `Startup::permitsWaiting`, `Startup::permitsAvailable` and
-  `Startup::busSize`.
+  `Startup::busSize`; slices `Startup::lockWait::sync`, `Startup::lockWait::async::<FQN>` and `Startup::awaitAll`.
+  Public `initializeComponent`/`doInitialize` calls are wrapped in `Startup::onDemand::<FQN>`; startup-driven
+  initialization (including sync dependencies of async initializers) is not.
 - Each initializer class is now instantiated once per startup (graph passes no longer create
   throwaway instances).
 

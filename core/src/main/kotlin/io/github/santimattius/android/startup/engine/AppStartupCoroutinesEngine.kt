@@ -2,8 +2,11 @@ package io.github.santimattius.android.startup.engine
 
 import android.util.Log
 import io.github.santimattius.android.startup.StartupState
+import io.github.santimattius.android.startup.trace.StartupTraceNames
 import io.github.santimattius.android.startup.trace.StartupTracer
 import io.github.santimattius.android.startup.trace.SystemStartupTracer
+import io.github.santimattius.android.startup.trace.closeAsyncSection
+import io.github.santimattius.android.startup.trace.openAsyncSection
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
@@ -172,6 +175,7 @@ internal class AppStartupCoroutinesEngine(
 
     suspend fun awaitAllStartJobs() {
         Log.d(EXTENSION_NAME, "$TAG - await All Start Jobs ...")
+        val span = tracer.openAsyncSection { StartupTraceNames.of("awaitAll", null) }
         try {
             _startJobs.awaitAll()
             _startupState.value = StartupState.COMPLETED
@@ -182,6 +186,7 @@ internal class AppStartupCoroutinesEngine(
             throw e
         } finally {
             _startJobs.clear()
+            tracer.closeAsyncSection(span)
         }
     }
 
@@ -196,6 +201,7 @@ internal class AppStartupCoroutinesEngine(
      */
     suspend fun awaitAllStartJobs(timeoutMs: Long) {
         Log.d(EXTENSION_NAME, "$TAG - await All Start Jobs with timeout ${timeoutMs}ms ...")
+        val span = tracer.openAsyncSection { StartupTraceNames.of("awaitAll", null) }
         try {
             withTimeout(timeoutMs) {
                 _startJobs.awaitAll()
@@ -209,6 +215,7 @@ internal class AppStartupCoroutinesEngine(
             throw e
         } finally {
             _startJobs.clear()
+            tracer.closeAsyncSection(span)
         }
     }
 
