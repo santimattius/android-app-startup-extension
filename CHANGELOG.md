@@ -56,6 +56,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name) and the initializer node section is an async slice, so it is balanced across thread hops.
   Names longer than 127 chars keep the `Startup::<phase>::` prefix and shorten the FQN from the left.
 - New trace sections `Startup::deps::<FQN>`, `Startup::permitWait::<FQN>` and `Startup::create::<FQN>`.
+- New trace sections `Startup::discover::sync|async`, `Startup::resolveGraph::topological|validateRoots|effectivePriorities`
+  (main thread), `Startup::instantiate::<FQN>` and, for deferred initializers, an async
+  `Startup::deferred::awaitFirstFrame::<FQN>` slice followed by a `Startup::marker::deferredSignal|deferredTimeout::<FQN>` marker.
 - Each initializer class is now instantiated once per startup (graph passes no longer create
   throwaway instances).
 

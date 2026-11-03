@@ -1,5 +1,9 @@
 package io.github.santimattius.android.startup
 
+import io.github.santimattius.android.startup.trace.StartupTracer
+import io.github.santimattius.android.startup.trace.StartupTraceNames
+import io.github.santimattius.android.startup.trace.SystemStartupTracer
+import io.github.santimattius.android.startup.trace.section
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -14,7 +18,9 @@ import java.util.concurrent.ConcurrentHashMap
  * cached for the lifetime of this registry; the registry is owned by a single
  * `AppStartupInitializer`, so that is bounded by one startup's initializer set.
  */
-internal class InitializerRegistry {
+internal class InitializerRegistry(
+    private val tracer: StartupTracer = SystemStartupTracer,
+) {
 
     private val instances = ConcurrentHashMap<Class<*>, Any>()
 
@@ -22,5 +28,8 @@ internal class InitializerRegistry {
 
     fun take(cls: Class<*>): Any = instances.remove(cls) ?: newInstance(cls)
 
-    private fun newInstance(cls: Class<*>): Any = cls.getDeclaredConstructor().newInstance()
+    private fun newInstance(cls: Class<*>): Any =
+        tracer.section({ StartupTraceNames.of("instantiate", cls.name) }) {
+            cls.getDeclaredConstructor().newInstance()
+        }
 }
