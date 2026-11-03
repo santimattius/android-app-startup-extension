@@ -71,14 +71,21 @@ class AppStartupInitializer internal constructor(
         cap = config.maxConcurrentAsyncInitializers,
     )
 
-    private val metricsBus = StartupMetricsBus()
+    private val metricsBus = StartupMetricsBus(config.metricsReplayCapacity)
 
     /**
      * Hot [SharedFlow] that emits a [StartupMetric] after each initializer completes,
      * whether it succeeds or throws.
      *
-     * All emitted values are replayed to late collectors: a collector joining after startup
-     * finishes will still receive the full set of metrics from the startup sequence.
+     * Late collectors get a bounded replay: a collector joining after startup finishes receives the
+     * most recent [AppStartupConfig.metricsReplayCapacity] (default 256) metrics in emission order,
+     * i.e. the full startup unless more initializers than that ran. Beyond the bound the oldest
+     * metrics are dropped first and emitters never suspend.
+     *
+     * **Slow live collectors lose metrics too:** the same bound applies to a collector that is already
+     * subscribed. There is no extra buffer, so if it lags behind by more than the capacity it skips
+     * the oldest metrics (`DROP_OLDEST`). The drop warning is only logged when debug logging is
+     * enabled, so the loss is otherwise silent.
      *
      * **Thread of emission:** metrics are emitted from the initializer's own thread —
      * the Main Thread for sync initializers, and the initializer's `dispatcher()` for async ones.
@@ -313,7 +320,7 @@ class AppStartupInitializer internal constructor(
                             .forEach { doInitialize<Any>(it, initializing) }
                     }
 
-                    StartupExtensionLogger.info("Initializing ${component.name}")
+                    StartupExtensionLogger.info { "Initializing ${component.name}" }
                     val startNs = System.nanoTime()
                     val startUptimeMs = SystemClock.uptimeMillis()
                     var success = false
@@ -337,7 +344,7 @@ class AppStartupInitializer internal constructor(
                             initializer.create(applicationContext)
                         }
                         success = true
-                        StartupExtensionLogger.info("Initialized ${component.name}")
+                        StartupExtensionLogger.info { "Initialized ${component.name}" }
                         result
                     } catch (t: Throwable) {
                         failure = t
@@ -421,7 +428,7 @@ class AppStartupInitializer internal constructor(
                             .forEach { doInitialize<Any>(it) }
                     }
 
-                    StartupExtensionLogger.info("Initializing ${component.name}")
+                    StartupExtensionLogger.info { "Initializing ${component.name}" }
                     val effectiveDispatcher =
                         asyncInitializer.dispatcher() ?: config.defaultAsyncDispatcher
 
@@ -454,7 +461,7 @@ class AppStartupInitializer internal constructor(
                             }
                         }
                         success = true
-                        StartupExtensionLogger.info("Initialized ${component.name}")
+                        StartupExtensionLogger.info { "Initialized ${component.name}" }
                         result
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         wasCancelled = true
@@ -492,7 +499,7 @@ class AppStartupInitializer internal constructor(
                     throw e
                 } catch (throwable: Throwable) {
                     StartupExtensionLogger.error(
-                        "Error initializing ${component.name}: ${throwable.message}",
+                        { "Error initializing ${component.name}: ${throwable.message}" },
                         throwable
                     )
                     throw StartupExtensionException(throwable)
@@ -539,7 +546,7 @@ class AppStartupInitializer internal constructor(
                         Class.forName(key, false, applicationContext.classLoader)
                             .takeIf { StartupSyncInitializer::class.java.isAssignableFrom(it) }
                             ?.let { it as Class<out StartupSyncInitializer<*>> }
-                            ?.also { StartupExtensionLogger.info("Discovered $key") }
+                            ?.also { StartupExtensionLogger.info { "Discovered $key" } }
                     } catch (e: ClassNotFoundException) {
                         throw StartupExtensionException(e)
                     }
@@ -649,7 +656,7 @@ class AppStartupInitializer internal constructor(
                         Class.forName(key, false, applicationContext.classLoader)
                             .takeIf { StartupAsyncInitializer::class.java.isAssignableFrom(it) }
                             ?.let { it as Class<out StartupAsyncInitializer<*>> }
-                            ?.also { StartupExtensionLogger.info("Discovered $key") }
+                            ?.also { StartupExtensionLogger.info { "Discovered $key" } }
                     } catch (e: ClassNotFoundException) {
                         throw StartupExtensionException(e)
                     }
@@ -857,14 +864,14 @@ class AppStartupInitializer internal constructor(
         if (snapshot <= config.strictModeConcurrencyThreshold) return
         if (!strictModeConcurrencyWarned.compareAndSet(false, true)) return
 
-        StartupExtensionLogger.warning(
+        StartupExtensionLogger.warning {
             "Async startup concurrency reached $snapshot concurrently-active initializers, " +
                 "exceeding strictModeConcurrencyThreshold=${config.strictModeConcurrencyThreshold} " +
                 "on dispatcher $dispatcher. This can indicate a coroutine storm (thread " +
                 "oversubscription). Remediation: set AppStartupConfig.maxConcurrentAsyncInitializers " +
                 "to cap concurrency, or set a more suitable defaultAsyncDispatcher / per-initializer " +
                 "dispatcher()."
-        )
+        }
     }
 
     /**

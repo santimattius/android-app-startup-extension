@@ -15,11 +15,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `processStartOffsetMs`, `priority`, `initializerFqn`, `errorType` and `errorMessage`. Errors are
   reported as strings only; no `Throwable` is retained. Timestamps use `SystemClock.uptimeMillis()`. An initializer cancelled before `create()` starts
   reports `0` for both timestamps (unknown) instead of a nonzero end with a zero start.
+- `AppStartupConfig.metricsReplayCapacity` (default `256`) bounds the replay of
+  `AppStartupInitializer.metricsFlow`.
+  The bound also applies to live collectors: one lagging by more than the capacity loses the oldest
+  metrics (`DROP_OLDEST`, no extra buffer), and the drop warning is only logged when debug logging is
+  enabled.
 - Public API guard: `core/api/core.api` is the committed ABI dump; CI runs `./gradlew :core:apiCheck`
   and `./gradlew :core:apiDump` regenerates it after an intentional change.
 
 ### Changed
 
+- `metricsFlow` no longer replays unbounded history: late collectors receive the most recent
+  `metricsReplayCapacity` metrics in order (the full startup in practice); beyond the bound the oldest
+  are dropped first, emitters never suspend, and one warning is logged (when debug logging is on).
+- Debug log messages are built lazily, so nothing is allocated for them when `debugLoggingEnabled`
+  is `false`.
 - ABI note for `StartupMetric`: the new fields change the generated `copy`, `copy$default`, the
   synthetic default constructor and add `component10..16`. Source compatibility is unchanged and
   `@JvmOverloads` keeps every previous constructor signature, but code compiled against 2.2.0 that

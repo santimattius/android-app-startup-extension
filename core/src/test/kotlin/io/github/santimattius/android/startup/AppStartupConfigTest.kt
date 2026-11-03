@@ -30,6 +30,21 @@ class AppStartupConfigTest {
     }
 
     @Test
+    fun `metricsReplayCapacity defaults to 256 and honors a custom value`() {
+        assertEquals(256, AppStartupConfig.default().metricsReplayCapacity)
+        assertEquals(
+            64,
+            AppStartupConfig.Builder().apply { metricsReplayCapacity = 64 }.build().metricsReplayCapacity,
+        )
+    }
+
+    @Test
+    fun `non-positive metricsReplayCapacity falls back to the default`() {
+        assertEquals(256, AppStartupConfig.Builder().apply { metricsReplayCapacity = 0 }.build().metricsReplayCapacity)
+        assertEquals(256, AppStartupConfig.Builder().apply { metricsReplayCapacity = -5 }.build().metricsReplayCapacity)
+    }
+
+    @Test
     fun `default config has debug logging disabled`() {
         assertFalse(StartupExtensionLogger.isDebugEnabled)
     }

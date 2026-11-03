@@ -3,6 +3,8 @@ package io.github.santimattius.android.startup
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 
+internal const val DEFAULT_METRICS_REPLAY_CAPACITY = 256
+
 /**
  * Controls how sync initializers are ordered before execution begins.
  *
@@ -69,6 +71,7 @@ class AppStartupConfig private constructor(
     val strictModeConcurrencyThreshold: Int,
     val firstFrameSignal: FirstFrameSignal?,
     val deferredStartupTimeoutMs: Long,
+    val metricsReplayCapacity: Int,
 ) {
     class Builder {
         var strictModeCheckEnabled: Boolean = false
@@ -114,6 +117,20 @@ class AppStartupConfig private constructor(
          */
         var deferredStartupTimeoutMs: Long = 5_000L
 
+        /**
+         * How many of the most recent [StartupMetric]s a late collector of
+         * [AppStartupInitializer.metricsFlow] can still receive. Defaults to `256`, enough for the full
+         * startup of any realistic app. When exceeded, the oldest metrics are dropped first and
+         * emitters never suspend.
+         *
+         * The same bound applies to LIVE collectors: there is no extra buffer, so a collector that
+         * lags behind by more than this many metrics also loses the oldest ones (`DROP_OLDEST`). The
+         * warning about dropped metrics is only logged when [debugLoggingEnabled] is `true`.
+         *
+         * Values `<= 0` fall back to the default at [build] time.
+         */
+        var metricsReplayCapacity: Int = DEFAULT_METRICS_REPLAY_CAPACITY
+
         internal fun build() = AppStartupConfig(
             strictModeCheckEnabled = strictModeCheckEnabled,
             debugLoggingEnabled = debugLoggingEnabled,
@@ -124,6 +141,7 @@ class AppStartupConfig private constructor(
             strictModeConcurrencyThreshold = strictModeConcurrencyThreshold,
             firstFrameSignal = firstFrameSignal,
             deferredStartupTimeoutMs = deferredStartupTimeoutMs,
+            metricsReplayCapacity = metricsReplayCapacity.takeIf { it > 0 } ?: DEFAULT_METRICS_REPLAY_CAPACITY,
         )
     }
 
