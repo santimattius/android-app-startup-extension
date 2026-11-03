@@ -43,6 +43,11 @@ jobs:
       - name: Check public API (ABI dump)
         run: ./gradlew :core:apiCheck --stacktrace --no-daemon
 
+      - name: Guard the published POM and Gradle metadata against tracing dependencies
+        run: |
+          ./gradlew :core:generatePomFileForMavenPublication :core:generateMetadataFileForMavenPublication --stacktrace --no-daemon
+          .github/scripts/check-pom-no-tracing.sh
+
   release-r8:
     name: Release build (R8)
     runs-on: ubuntu-latest
