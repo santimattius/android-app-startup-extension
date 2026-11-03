@@ -9,4 +9,8 @@ class SyncTestInitializer : StartupSyncInitializer<Unit> {
     override fun create(context: Context) {
         Log.d("SyncTestInitializer", "TestInitializer created")
     }
+
+    // Dependency-only initializer: see DependencyOnlyInitializer.
+    override fun dependencies(): List<Class<out StartupSyncInitializer<*>>> =
+        listOf(DependencyOnlyInitializer::class.java)
 }
