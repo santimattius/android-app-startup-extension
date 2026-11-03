@@ -31,12 +31,15 @@ internal class StartupMetricsBus(
     /** Mirrors the bounded replay (`<= capacity`); owned here because `replayCache` copies the buffer. */
     private val size = AtomicInteger(0)
 
+    /** Serializes read+emit so a stale size can never be recorded after a newer one. */
+    private val counterLock = Any()
+
     val metricsFlow: SharedFlow<StartupMetric> = _flow.asSharedFlow()
 
     fun publish(metric: StartupMetric) {
         _flow.tryEmit(metric)
         size.updateAndGet { if (it < capacity) it + 1 else it }
-        if (tracer.isAsyncEnabled) synchronized(size) { tracer.setCounter(BUS_SIZE, size.get().toLong()) }
+        if (tracer.isAsyncEnabled) synchronized(counterLock) { tracer.setCounter(BUS_SIZE, size.get().toLong()) }
         if (published.incrementAndGet() == capacity + 1) {
             StartupExtensionLogger.warning {
                 "Metrics replay is bounded to $capacity; the oldest metrics are now dropped for late " +

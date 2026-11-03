@@ -9,12 +9,14 @@ import android.os.Bundle
 import io.github.santimattius.android.startup.AppStartupInitializer
 import io.github.santimattius.android.startup.InitializationProvider
 import io.github.santimattius.android.startup.awaitAllStartJobs
+import io.github.santimattius.android.startup.engine.AppStartupCoroutinesEngine
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -129,6 +131,58 @@ class TraceLockAwaitTriggerTest {
             assertTrue(tracer.asyncEndIndex("Startup::awaitAll") > tracer.asyncBeginIndex("Startup::awaitAll"))
             assertTrue(tracer.asyncBalanced())
         }
+    }
+
+    @Test
+    fun `an uncontended sync lockWait begins and ends with nothing in between`() {
+        val initializer = AppStartupInitializer(context, Dispatchers.Default, tracer)
+
+        initializer.doInitialize<String>(SyncOther::class.java)
+
+        val wait = "Startup::lockWait::sync"
+        assertTrue(tracer.syncBeginIndex(wait) >= 0)
+        assertEquals(tracer.syncBeginIndex(wait) + 1, tracer.syncEndIndex(wait))
+        assertTrue(tracer.syncBalanced())
+    }
+
+    @Test
+    fun `awaitAll slice is closed when the jobs fail or the awaiter is cancelled in both overloads`() {
+        listOf<suspend (AppStartupCoroutinesEngine) -> Unit>(
+            { it.awaitAllStartJobs() },
+            { it.awaitAllStartJobs(5_000L) },
+        ).forEach { await ->
+            tracer.events.clear()
+            val failing = AppStartupCoroutinesEngine(Dispatchers.IO, tracer = tracer)
+            failing.launchStartJob<Unit> { error("boom") }
+            assertTrue(runCatching { runBlocking { await(failing) } }.exceptionOrNull() is IllegalStateException)
+            assertTrue("closed after failure", tracer.asyncEndIndex("Startup::awaitAll") > tracer.asyncBeginIndex("Startup::awaitAll"))
+            assertTrue(tracer.asyncBalanced())
+
+            tracer.events.clear()
+            val pending = AppStartupCoroutinesEngine(Dispatchers.IO, tracer = tracer)
+            pending.launchStartJob { CompletableDeferred<Unit>().await() }
+            runBlocking {
+                val caller = launch(Dispatchers.IO) { await(pending) }
+                awaitEvent { tracer.asyncBeginIndex("Startup::awaitAll") >= 0 }
+                assertEquals(-1, tracer.asyncEndIndex("Startup::awaitAll"))
+                caller.cancelAndJoin()
+            }
+            assertTrue("closed after cancellation", tracer.asyncEndIndex("Startup::awaitAll") > tracer.asyncBeginIndex("Startup::awaitAll"))
+            assertTrue(tracer.asyncBalanced())
+            pending.cancel()
+        }
+    }
+
+    @Test
+    fun `awaitAll slice is closed when the timed overload times out`() {
+        val engine = AppStartupCoroutinesEngine(Dispatchers.IO, tracer = tracer)
+        engine.launchStartJob { CompletableDeferred<Unit>().await() }
+
+        runCatching { runBlocking { engine.awaitAllStartJobs(50L) } }
+
+        assertTrue(tracer.asyncEndIndex("Startup::awaitAll") > tracer.asyncBeginIndex("Startup::awaitAll"))
+        assertTrue(tracer.asyncBalanced())
+        engine.cancel()
     }
 
     @Test

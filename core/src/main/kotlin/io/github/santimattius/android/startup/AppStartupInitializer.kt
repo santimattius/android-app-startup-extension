@@ -32,7 +32,6 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
@@ -897,6 +896,7 @@ class AppStartupInitializer internal constructor(
         clampedTo: StartupPriority,
     ) {
         if (!inversionWarned.compareAndSet(false, true)) return
+        tracer.mark { StartupTraceNames.of("marker::priorityInversion", node.name) }
 
         Log.w(
             STARTUP_LOG_TAG,
@@ -924,6 +924,7 @@ class AppStartupInitializer internal constructor(
         if (!config.strictModeCheckEnabled) return
         if (snapshot <= config.strictModeConcurrencyThreshold) return
         if (!strictModeConcurrencyWarned.compareAndSet(false, true)) return
+        tracer.mark { StartupTraceNames.of("marker::strictModeConcurrency", null) }
 
         StartupExtensionLogger.warning {
             "Async startup concurrency reached $snapshot concurrently-active initializers, " +
