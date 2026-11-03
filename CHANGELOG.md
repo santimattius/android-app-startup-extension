@@ -9,8 +9,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `StartupMetric` has new trailing defaulted fields: `startTimestampMs`, `endTimestampMs`,
+  `processStartOffsetMs`, `priority`, `initializerFqn`, `errorType` and `errorMessage`. Errors are
+  reported as strings only; no `Throwable` is retained. Timestamps use `SystemClock.uptimeMillis()`. An initializer cancelled before `create()` starts
+  reports `0` for both timestamps (unknown) instead of a nonzero end with a zero start.
+- Public API guard: `core/api/core.api` is the committed ABI dump; CI runs `./gradlew :core:apiCheck`
+  and `./gradlew :core:apiDump` regenerates it after an intentional change.
+
 ### Changed
 
+- ABI note for `StartupMetric`: the new fields change the generated `copy`, `copy$default`, the
+  synthetic default constructor and add `component10..16`. Source compatibility is unchanged and
+  `@JvmOverloads` keeps every previous constructor signature, but code compiled against 2.2.0 that
+  calls `copy(...)` with defaults or the Kotlin default constructor must be recompiled.
 - Trace section names now use the fully-qualified class name (`Startup::<FQN>` instead of the simple
   name) and the initializer node section is an async slice, so it is balanced across thread hops.
   Names longer than 127 chars keep the `Startup::<phase>::` prefix and shorten the FQN from the left.

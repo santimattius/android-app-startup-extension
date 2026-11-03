@@ -1,0 +1,201 @@
+public final class io/github/santimattius/android/startup/AppStartupConfig {
+	public final fun getAsyncInitializerStrategy ()Lio/github/santimattius/android/startup/AsyncInitializerStrategy;
+	public final fun getDebugLoggingEnabled ()Z
+	public final fun getDefaultAsyncDispatcher ()Lkotlinx/coroutines/CoroutineDispatcher;
+	public final fun getDeferredStartupTimeoutMs ()J
+	public final fun getFirstFrameSignal ()Lio/github/santimattius/android/startup/FirstFrameSignal;
+	public final fun getMaxConcurrentAsyncInitializers ()Ljava/lang/Integer;
+	public final fun getStrictModeCheckEnabled ()Z
+	public final fun getStrictModeConcurrencyThreshold ()I
+	public final fun getSyncOrderingStrategy ()Lio/github/santimattius/android/startup/SyncOrderingStrategy;
+}
+
+public final class io/github/santimattius/android/startup/AppStartupConfig$Builder {
+	public fun <init> ()V
+	public final fun getAsyncInitializerStrategy ()Lio/github/santimattius/android/startup/AsyncInitializerStrategy;
+	public final fun getDebugLoggingEnabled ()Z
+	public final fun getDefaultAsyncDispatcher ()Lkotlinx/coroutines/CoroutineDispatcher;
+	public final fun getDeferredStartupTimeoutMs ()J
+	public final fun getFirstFrameSignal ()Lio/github/santimattius/android/startup/FirstFrameSignal;
+	public final fun getMaxConcurrentAsyncInitializers ()Ljava/lang/Integer;
+	public final fun getStrictModeCheckEnabled ()Z
+	public final fun getStrictModeConcurrencyThreshold ()I
+	public final fun getSyncOrderingStrategy ()Lio/github/santimattius/android/startup/SyncOrderingStrategy;
+	public final fun setAsyncInitializerStrategy (Lio/github/santimattius/android/startup/AsyncInitializerStrategy;)V
+	public final fun setDebugLoggingEnabled (Z)V
+	public final fun setDefaultAsyncDispatcher (Lkotlinx/coroutines/CoroutineDispatcher;)V
+	public final fun setDeferredStartupTimeoutMs (J)V
+	public final fun setFirstFrameSignal (Lio/github/santimattius/android/startup/FirstFrameSignal;)V
+	public final fun setMaxConcurrentAsyncInitializers (Ljava/lang/Integer;)V
+	public final fun setStrictModeCheckEnabled (Z)V
+	public final fun setStrictModeConcurrencyThreshold (I)V
+	public final fun setSyncOrderingStrategy (Lio/github/santimattius/android/startup/SyncOrderingStrategy;)V
+}
+
+public final class io/github/santimattius/android/startup/AppStartupExtensionKt {
+	public static final fun awaitAllStartJobs (Lio/github/santimattius/android/startup/AppStartupInitializer;JLkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static final fun awaitAllStartJobs (Lio/github/santimattius/android/startup/AppStartupInitializer;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static final fun getStartupState (Lio/github/santimattius/android/startup/AppStartupInitializer;)Lkotlinx/coroutines/flow/StateFlow;
+	public static final fun isAllStartedJobsDone (Lio/github/santimattius/android/startup/AppStartupInitializer;)Z
+	public static final fun onAppStartupLaunched (Lio/github/santimattius/android/startup/AppStartupInitializer;Lkotlin/jvm/functions/Function2;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+}
+
+public final class io/github/santimattius/android/startup/AppStartupInitializer {
+	public static final field Companion Lio/github/santimattius/android/startup/AppStartupInitializer$Companion;
+	public final fun doInitialize (Ljava/lang/Class;)Ljava/lang/Object;
+	public final fun doInitialize (Ljava/lang/Class;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun getMetricsFlow ()Lkotlinx/coroutines/flow/SharedFlow;
+	public final fun initializeComponent (Ljava/lang/Class;)Ljava/lang/Object;
+	public final fun isEagerlyAsyncInitialized (Ljava/lang/Class;)Z
+	public final fun isEagerlySyncInitialized (Ljava/lang/Class;)Z
+}
+
+public final class io/github/santimattius/android/startup/AppStartupInitializer$Companion {
+	public final fun configure (Lkotlin/jvm/functions/Function1;)V
+	public final fun getInstance (Landroid/content/Context;)Lio/github/santimattius/android/startup/AppStartupInitializer;
+}
+
+public abstract class io/github/santimattius/android/startup/AsyncInitializerStrategy {
+}
+
+public final class io/github/santimattius/android/startup/AsyncInitializerStrategy$Concurrent : io/github/santimattius/android/startup/AsyncInitializerStrategy {
+	public static final field INSTANCE Lio/github/santimattius/android/startup/AsyncInitializerStrategy$Concurrent;
+}
+
+public final class io/github/santimattius/android/startup/AsyncInitializerStrategy$Validated : io/github/santimattius/android/startup/AsyncInitializerStrategy {
+	public static final field INSTANCE Lio/github/santimattius/android/startup/AsyncInitializerStrategy$Validated;
+}
+
+public abstract interface class io/github/santimattius/android/startup/FirstFrameSignal {
+	public abstract fun await (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+}
+
+public final class io/github/santimattius/android/startup/InitializationProvider : android/content/ContentProvider {
+	public fun <init> ()V
+	public fun delete (Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I
+	public fun getType (Landroid/net/Uri;)Ljava/lang/String;
+	public fun insert (Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;
+	public fun onCreate ()Z
+	public fun query (Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;
+	public fun update (Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I
+}
+
+public final class io/github/santimattius/android/startup/StartupExtensionException : java/lang/Exception {
+	public fun <init> ()V
+	public fun <init> (Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/Throwable;)V
+	public fun <init> (Ljava/lang/Throwable;)V
+}
+
+public final class io/github/santimattius/android/startup/StartupMetric {
+	public fun <init> (Ljava/lang/String;JZZ)V
+	public fun <init> (Ljava/lang/String;JZZZ)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;I)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJ)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJ)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJJ)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJJJ)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJJJLio/github/santimattius/android/startup/StartupPriority;)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJJJLio/github/santimattius/android/startup/StartupPriority;Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJJJLio/github/santimattius/android/startup/StartupPriority;Ljava/lang/String;Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJJJLio/github/santimattius/android/startup/StartupPriority;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public synthetic fun <init> (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJJJLio/github/santimattius/android/startup/StartupPriority;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component10 ()J
+	public final fun component11 ()J
+	public final fun component12 ()J
+	public final fun component13 ()Lio/github/santimattius/android/startup/StartupPriority;
+	public final fun component14 ()Ljava/lang/String;
+	public final fun component15 ()Ljava/lang/String;
+	public final fun component16 ()Ljava/lang/String;
+	public final fun component2 ()J
+	public final fun component3 ()Z
+	public final fun component4 ()Z
+	public final fun component5 ()Z
+	public final fun component6 ()Ljava/lang/String;
+	public final fun component7 ()Ljava/lang/String;
+	public final fun component8 ()I
+	public final fun component9 ()J
+	public final fun copy (Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJJJLio/github/santimattius/android/startup/StartupPriority;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Lio/github/santimattius/android/startup/StartupMetric;
+	public static synthetic fun copy$default (Lio/github/santimattius/android/startup/StartupMetric;Ljava/lang/String;JZZZLjava/lang/String;Ljava/lang/String;IJJJJLio/github/santimattius/android/startup/StartupPriority;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/github/santimattius/android/startup/StartupMetric;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getConcurrentActiveCount ()I
+	public final fun getDispatcherName ()Ljava/lang/String;
+	public final fun getDurationMs ()J
+	public final fun getEndTimestampMs ()J
+	public final fun getErrorMessage ()Ljava/lang/String;
+	public final fun getErrorType ()Ljava/lang/String;
+	public final fun getInitializerFqn ()Ljava/lang/String;
+	public final fun getInitializerName ()Ljava/lang/String;
+	public final fun getPriority ()Lio/github/santimattius/android/startup/StartupPriority;
+	public final fun getProcessStartOffsetMs ()J
+	public final fun getQueueDelayMs ()J
+	public final fun getStartTimestampMs ()J
+	public final fun getSuccess ()Z
+	public final fun getThreadName ()Ljava/lang/String;
+	public final fun getWasCancelled ()Z
+	public fun hashCode ()I
+	public final fun isAsync ()Z
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/github/santimattius/android/startup/StartupPriority : java/lang/Enum {
+	public static final field CRITICAL Lio/github/santimattius/android/startup/StartupPriority;
+	public static final field DEFERRED Lio/github/santimattius/android/startup/StartupPriority;
+	public static final field NORMAL Lio/github/santimattius/android/startup/StartupPriority;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/github/santimattius/android/startup/StartupPriority;
+	public static fun values ()[Lio/github/santimattius/android/startup/StartupPriority;
+}
+
+public final class io/github/santimattius/android/startup/StartupState : java/lang/Enum {
+	public static final field COMPLETED Lio/github/santimattius/android/startup/StartupState;
+	public static final field ERROR Lio/github/santimattius/android/startup/StartupState;
+	public static final field IDLE Lio/github/santimattius/android/startup/StartupState;
+	public static final field IN_PROGRESS Lio/github/santimattius/android/startup/StartupState;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/github/santimattius/android/startup/StartupState;
+	public static fun values ()[Lio/github/santimattius/android/startup/StartupState;
+}
+
+public abstract class io/github/santimattius/android/startup/SyncOrderingStrategy {
+}
+
+public final class io/github/santimattius/android/startup/SyncOrderingStrategy$Lazy : io/github/santimattius/android/startup/SyncOrderingStrategy {
+	public static final field INSTANCE Lio/github/santimattius/android/startup/SyncOrderingStrategy$Lazy;
+}
+
+public final class io/github/santimattius/android/startup/SyncOrderingStrategy$Topological : io/github/santimattius/android/startup/SyncOrderingStrategy {
+	public static final field INSTANCE Lio/github/santimattius/android/startup/SyncOrderingStrategy$Topological;
+}
+
+public abstract interface class io/github/santimattius/android/startup/initializer/StartupAsyncInitializer {
+	public abstract fun create (Landroid/content/Context;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public fun dependencies ()Ljava/util/List;
+	public fun dispatcher ()Lkotlinx/coroutines/CoroutineDispatcher;
+	public fun priority ()Lio/github/santimattius/android/startup/StartupPriority;
+	public fun retainAfterStartup ()Z
+	public fun syncDependencies ()Ljava/util/List;
+}
+
+public final class io/github/santimattius/android/startup/initializer/StartupAsyncInitializer$DefaultImpls {
+	public static fun dependencies (Lio/github/santimattius/android/startup/initializer/StartupAsyncInitializer;)Ljava/util/List;
+	public static fun dispatcher (Lio/github/santimattius/android/startup/initializer/StartupAsyncInitializer;)Lkotlinx/coroutines/CoroutineDispatcher;
+	public static fun priority (Lio/github/santimattius/android/startup/initializer/StartupAsyncInitializer;)Lio/github/santimattius/android/startup/StartupPriority;
+	public static fun retainAfterStartup (Lio/github/santimattius/android/startup/initializer/StartupAsyncInitializer;)Z
+	public static fun syncDependencies (Lio/github/santimattius/android/startup/initializer/StartupAsyncInitializer;)Ljava/util/List;
+}
+
+public abstract interface class io/github/santimattius/android/startup/initializer/StartupSyncInitializer {
+	public abstract fun create (Landroid/content/Context;)Ljava/lang/Object;
+	public fun dependencies ()Ljava/util/List;
+	public fun retainAfterStartup ()Z
+}
+
+public final class io/github/santimattius/android/startup/initializer/StartupSyncInitializer$DefaultImpls {
+	public static fun dependencies (Lio/github/santimattius/android/startup/initializer/StartupSyncInitializer;)Ljava/util/List;
+	public static fun retainAfterStartup (Lio/github/santimattius/android/startup/initializer/StartupSyncInitializer;)Z
+}
+
