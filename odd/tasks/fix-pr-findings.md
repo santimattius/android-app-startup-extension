@@ -9,7 +9,7 @@ Test runner: Gradle wrapper through the managed `gradle_run.py` workflow.
 3. **S3 — Demo execution safety.** UI-triggered demo cases must execute serially, reject duplicate taps while running, preserve coroutine cancellation, and test both manifest-backed eager `true` and on-demand/dependency `false` results.
 4. **S4 — Failure example accuracy.** The advanced failure case must describe and test the serialized on-demand behavior it actually exercises, without claiming concurrent sibling isolation.
 5. **S5 — Waiting and instrumentation ownership.** UI lifecycle cancellation must not reach the singleton startup wait operations, and dispatcher instrumentation must run transactionally and restore the captured prior settings automatically.
-6. **S6 — Verification.** Focused tests, the applicable app test suite, diagnostics, and an independent high-risk verification must pass.
+6. **S6 — Verification.** Focused tests, the complete app unit-test suite, and lint must pass. The user explicitly accepted parent-run proof because the independent verifier's isolated Gradle setup was blocked by its harness; do not claim independent runtime execution.
 
 ## Tasks
 
@@ -17,7 +17,7 @@ Test runner: Gradle wrapper through the managed `gradle_run.py` workflow.
 - **T2** — S3 — inline — done — Commit `42b7338`. Shared runner owns observable active state, atomically rejects duplicates across recreation, and preserves cancellation; manifest-backed eager flags covered. Risk: item 4 (cross-recreation concurrency and cancellation).
 - **T3** — S4 — inline — done — Commit `42b7338`. Failure case now demonstrates reporting plus a later serialized request. Risk: none.
 - **T4** — S5 — inline — done — Commit `1b169a6`. Startup waits shield singleton bookkeeping from UI cancellation; instrumentation transaction restores captured settings on success, failure, and cancellation. Risk: item 4 (global wait and configuration cancellation boundaries).
-- **T5** — S6 — inline + delegated verifier — blocked — Parent focused/full tests and lint pass; waiting for a human decision because the required independent verifier's isolated setup was rejected by its harness and cannot be retried automatically.
+- **T5** — S6 — inline + delegated verifier — done — Parent focused/full tests and lint passed; independent structural review found one blocker that was corrected, and the user accepted parent-run proof after independent Gradle execution remained unavailable.
 
 ## Log
 
@@ -34,3 +34,4 @@ Test runner: Gradle wrapper through the managed `gradle_run.py` workflow.
 - **L11** — Feature-chain slice 1: `bcc426a` (`fix(app): report replay snapshots accurately`), covering T1/S2.
 - **L12** — Feature-chain slice 2: `1b169a6` (`fix(app): protect startup wait and instrumentation lifecycles`), covering T4/S5. Independent verifier unavailable; parent focused/full tests and lint passed.
 - **L13** — Feature-chain slice 3: `42b7338` (`fix(app): serialize demo case execution safely`), covering T2/S3 and T3/S4. Independent verifier blocker corrected; parent focused/full tests and lint passed.
+- **L14** — User decision: "Aceptar la evidencia parental". Independent Gradle execution remains unavailable and is not claimed.
