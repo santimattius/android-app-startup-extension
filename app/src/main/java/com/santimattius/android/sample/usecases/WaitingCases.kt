@@ -5,7 +5,9 @@ import io.github.santimattius.android.startup.awaitAllStartJobs
 import io.github.santimattius.android.startup.isAllStartedJobsDone
 import io.github.santimattius.android.startup.onAppStartupLaunched
 import io.github.santimattius.android.startup.startupState
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
 
 /** Use case B: waiting for startup. Only meaningful during the 5 s window after process start. */
 object WaitingCases {
@@ -20,7 +22,9 @@ object WaitingCases {
         val before = "state before: ${state()}, jobs done: ${done()}"
         val started = System.nanoTime()
         val outcome = try {
-            await()
+            // These waits mutate singleton startup-job bookkeeping when cancelled. Keep UI lifecycle
+            // cancellation outside the wait; the timed overload still enforces its own timeout.
+            withContext(NonCancellable) { await() }
             "returned normally"
         } catch (e: TimeoutCancellationException) {
             "TimeoutCancellationException"
