@@ -27,7 +27,11 @@ import kotlinx.coroutines.launch
 
 /** Generic list: one card per [DemoCase] with a Run button and its last output. */
 @Composable
-fun DemoCaseList(padding: PaddingValues, cases: List<DemoCase>) {
+fun DemoCaseList(
+    padding: PaddingValues,
+    cases: List<DemoCase>,
+    header: (@Composable () -> Unit)? = null,
+) {
     val context = LocalContext.current.applicationContext
     val startup = remember { AppStartupInitializer.getInstance(context) }
     // HashMap is Serializable, so the outputs survive rotation/process recreation of the activity.
@@ -38,6 +42,7 @@ fun DemoCaseList(padding: PaddingValues, cases: List<DemoCase>) {
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        header?.let { item { it() } }
         items(cases, key = { it.id }) { case ->
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {

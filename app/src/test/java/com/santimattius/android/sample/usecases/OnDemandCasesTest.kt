@@ -104,4 +104,18 @@ class OnDemandCasesTest {
         assertTrue(lines[2], lines[2].startsWith("abstract async: StartupExtensionException"))
         assertTrue(lines[3], lines[3].contains("Cycle detected"))
     }
+
+    @Test
+    fun `dispatcher instrumentation produces snapshots and can be restored`() {
+        try {
+            val lines = runBlocking {
+                DispatcherCases.all.take(2).flatMap { it.run(startup) }
+            }
+            assertTrue(lines.toString(), lines.any { it.contains("dispatched=") })
+            assertTrue(startup.dispatcherSnapshots().values.sumOf { it.totalDispatched } >= 9)
+        } finally {
+            SampleStartup.apply(StartupSettings())
+        }
+        assertFalse(SampleStartup.current.dispatcherInstrumentation)
+    }
 }

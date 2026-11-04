@@ -17,6 +17,16 @@ enum class Route(val title: String, val summary: String, val parent: Route?) {
         "On-demand initialization",
         "doInitialize, initializeComponent, retained vs transient, eager flags and dependencies.",
         Hub,
+    ),
+    Waiting(
+        "Waiting for startup",
+        "awaitAllStartJobs() vs awaitAllStartJobs(timeoutMs) and onAppStartupLaunched.",
+        Hub,
+    ),
+    Dispatchers(
+        "Dispatcher instrumentation",
+        "Enable dispatcherInstrumentationEnabled and read dispatcherSnapshots().",
+        Hub,
     );
 
     companion object {

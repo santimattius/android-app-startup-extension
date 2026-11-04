@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.lifecycleScope
 import com.santimattius.android.sample.ui.Route
+import com.santimattius.android.sample.usecases.ProcessRestart
 import com.santimattius.android.sample.ui.UseCasesHost
 import com.santimattius.android.sample.ui.theme.SampleTheme
 import io.github.santimattius.android.startup.AppStartupInitializer
@@ -35,9 +36,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Set by ProcessRestart to land directly on a use case; absent on a normal launch.
+        val initialRoute = Route.fromName(intent?.getStringExtra(ProcessRestart.EXTRA_ROUTE)).name
         setContent {
             SampleTheme {
-                var route by rememberSaveable { mutableStateOf(Route.Home.name) }
+                var route by rememberSaveable { mutableStateOf(initialRoute) }
                 val current = Route.fromName(route)
                 if (current == Route.Home) {
                     MainScreen(onOpenUseCases = { route = Route.Hub.name })
