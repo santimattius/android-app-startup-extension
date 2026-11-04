@@ -12,6 +12,11 @@ enum class Route(val title: String, val summary: String, val parent: Route?) {
         "Live observability",
         "startupState, metricsFlow table, isAllStartedJobsDone and bounded replay to a late collector.",
         Hub,
+    ),
+    OnDemand(
+        "On-demand initialization",
+        "doInitialize, initializeComponent, retained vs transient, eager flags and dependencies.",
+        Hub,
     );
 
     companion object {
