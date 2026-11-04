@@ -74,6 +74,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Each initializer class is now instantiated once per startup (graph passes no longer create
   throwaway instances).
 
+### Fixed
+
+- `InitializationProvider` no longer crashes the process at launch (`NullPointerException` in
+  `AppStartupInitializer.discoverAndInitialize`) when no initializers are declared in the manifest,
+  i.e. when the provider has no `<meta-data>`. Affects 2.2.0 as well.
+
 ### Removed
 
 - The library no longer declares `androidx.appcompat:appcompat` and `com.google.android.material:material`
