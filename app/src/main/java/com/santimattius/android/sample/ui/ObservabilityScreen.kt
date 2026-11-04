@@ -14,19 +14,21 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.santimattius.android.sample.usecases.accumulate
-import com.santimattius.android.sample.usecases.collectWindow
+import com.santimattius.android.sample.usecases.replaySnapshot
 import com.santimattius.android.sample.usecases.outcome
 import com.santimattius.android.sample.usecases.rows
 import io.github.santimattius.android.startup.AppStartupInitializer
@@ -34,7 +36,6 @@ import io.github.santimattius.android.startup.StartupMetric
 import io.github.santimattius.android.startup.isAllStartedJobsDone
 import io.github.santimattius.android.startup.startupState
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /** Use case A: startupState, metricsFlow, isAllStartedJobsDone and replay to a late collector. */
 @Composable
@@ -44,14 +45,17 @@ fun ObservabilityScreen(padding: PaddingValues) {
     val state by startup.startupState.collectAsStateWithLifecycle()
     val metrics by remember { startup.metricsFlow.accumulate() }
         .collectAsStateWithLifecycle(emptyList())
-    val jobsDone by produceState(startup.isAllStartedJobsDone()) {
-        while (true) {
-            value = startup.isAllStartedJobsDone()
-            delay(250)
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow
+        .collectAsState()
+    val jobsDone by produceState(false, lifecycleState) {
+        if (lifecycleState.isAtLeast(Lifecycle.State.STARTED)) {
+            while (true) {
+                value = startup.isAllStartedJobsDone()
+                delay(250)
+            }
         }
     }
     var replay by remember { mutableStateOf<List<StartupMetric>?>(null) }
-    val scope = rememberCoroutineScope()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(padding),
@@ -81,11 +85,13 @@ fun ObservabilityScreen(padding: PaddingValues) {
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Button(onClick = {
-                        scope.launch { replay = startup.metricsFlow.collectWindow(400) }
+                        replay = startup.metricsFlow.replaySnapshot()
                     }) { Text("Attach late collector") }
                     replay?.let { received ->
-                        Text("Received ${received.size} replayed metric(s): " +
-                            received.joinToString { it.initializerName })
+                        Text(
+                            "Received ${received.size} replayed metric(s): " +
+                                received.joinToString { it.initializerName },
+                        )
                     }
                 }
             }
