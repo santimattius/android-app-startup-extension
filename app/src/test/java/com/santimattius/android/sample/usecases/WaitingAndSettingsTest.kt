@@ -97,12 +97,13 @@ class WaitingAndSettingsTest {
             try {
                 SampleStartup.apply(baseline)
                 val entered = CompletableDeferred<Unit>()
-                val job = launch {
-                    SampleStartup.withDispatcherInstrumentation {
-                        entered.complete(Unit)
-                        awaitCancellation()
+                val job =
+                    launch {
+                        SampleStartup.withDispatcherInstrumentation {
+                            entered.complete(Unit)
+                            awaitCancellation()
+                        }
                     }
-                }
                 entered.await()
                 assertTrue(SampleStartup.current.dispatcherInstrumentation)
 

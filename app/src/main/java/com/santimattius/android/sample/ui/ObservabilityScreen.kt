@@ -28,8 +28,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.santimattius.android.sample.usecases.accumulate
-import com.santimattius.android.sample.usecases.replaySnapshot
 import com.santimattius.android.sample.usecases.outcome
+import com.santimattius.android.sample.usecases.replaySnapshot
 import com.santimattius.android.sample.usecases.rows
 import io.github.santimattius.android.startup.AppStartupInitializer
 import io.github.santimattius.android.startup.StartupMetric
