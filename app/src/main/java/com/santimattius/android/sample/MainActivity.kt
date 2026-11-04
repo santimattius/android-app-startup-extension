@@ -6,8 +6,10 @@ import androidx.activity.compose.ReportDrawn
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -15,10 +17,16 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.lifecycleScope
+import com.santimattius.android.sample.ui.Route
+import com.santimattius.android.sample.ui.UseCasesHost
 import com.santimattius.android.sample.ui.theme.SampleTheme
 import io.github.santimattius.android.startup.AppStartupInitializer
 import kotlinx.coroutines.launch
@@ -29,7 +37,13 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             SampleTheme {
-                MainScreen()
+                var route by rememberSaveable { mutableStateOf(Route.Home.name) }
+                val current = Route.fromName(route)
+                if (current == Route.Home) {
+                    MainScreen(onOpenUseCases = { route = Route.Hub.name })
+                } else {
+                    UseCasesHost(current) { route = it.name }
+                }
                 // The sample's content is static, so first composition means "data ready".
                 // ReportDrawn defers to the activity's FullyDrawnReporter, which calls
                 // reportFullyDrawn() once (enables TTFD in Macrobenchmark / Perfetto).
@@ -55,7 +69,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MainScreen() {
+private fun MainScreen(onOpenUseCases: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -73,7 +87,10 @@ private fun MainScreen() {
                 .padding(innerPadding),
             contentAlignment = Alignment.Center
         ) {
-            Greeting("Hello App Startup!")
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Greeting("Hello App Startup!")
+                Button(onClick = onOpenUseCases) { Text("Use cases") }
+            }
         }
     }
 }
@@ -90,6 +107,6 @@ fun Greeting(name: String, modifier: Modifier = Modifier) {
 @Composable
 fun GreetingPreview() {
     SampleTheme {
-        MainScreen()
+        MainScreen(onOpenUseCases = {})
     }
 }
