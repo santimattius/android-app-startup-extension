@@ -290,7 +290,8 @@ class AppStartupInitializer internal constructor(
                     Trace.endSection()
                 }
             }
-            val metadata = providerInfo.metaData
+            // A provider with no <meta-data> (no initializers declared) has null metaData.
+            val metadata = providerInfo.metaData ?: Bundle.EMPTY
             syncDiscoverAndInitialize(metadata)
             asyncDiscoverAndInitialize(metadata)
         } catch (exception: PackageManager.NameNotFoundException) {
