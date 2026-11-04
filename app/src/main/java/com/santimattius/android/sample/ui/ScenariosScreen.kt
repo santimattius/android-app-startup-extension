@@ -74,9 +74,12 @@ fun ScenariosScreen(padding: PaddingValues) {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("Evidence", style = MaterialTheme.typography.titleMedium)
-                    Text("dispatcherSnapshots: ${startup.dispatcherSnapshots().values.joinToString {
-                        "${it.label}(peak=${it.peakConcurrency})"
-                    }.ifEmpty { "empty" }}", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "dispatcherSnapshots: ${startup.dispatcherSnapshots().values.joinToString {
+                            "${it.label}(peak=${it.peakConcurrency})"
+                        }.ifEmpty { "empty" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     Button(onClick = { replayed = startup.metricsFlow.replaySnapshot().size }) {
                         Text("Count replayed metrics")
                     }
