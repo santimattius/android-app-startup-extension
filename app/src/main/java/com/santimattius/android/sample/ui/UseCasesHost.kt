@@ -19,6 +19,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.santimattius.android.sample.BuildConfig
+import com.santimattius.android.sample.usecases.DispatcherCases
+import com.santimattius.android.sample.usecases.OnDemandCases
 
 /** Hosts every screen except [Route.Home]; composed only after the user opens the use cases. */
 @Composable
@@ -28,6 +31,10 @@ fun UseCasesHost(route: Route, onNavigate: (Route) -> Unit) {
     UseCaseScaffold(route.title, onBack = { onNavigate(parent) }) { padding ->
         when (route) {
             Route.Observability -> ObservabilityScreen(padding)
+            Route.OnDemand -> DemoCaseList(padding, OnDemandCases.all)
+            Route.Waiting -> WaitingScreen(padding)
+            Route.Scenarios -> if (BuildConfig.DEBUG) ScenariosScreen(padding) else HubScreen(padding, onNavigate)
+            Route.Dispatchers -> DemoCaseList(padding, DispatcherCases.all)
             else -> HubScreen(padding, onNavigate)
         }
     }
