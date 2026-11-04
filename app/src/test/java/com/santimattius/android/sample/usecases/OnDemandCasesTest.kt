@@ -73,4 +73,35 @@ class OnDemandCasesTest {
     fun `every case has a unique id`() {
         assertEquals(OnDemandCases.all.size, OnDemandCases.all.map { it.id }.toSet().size)
     }
+
+    @Test
+    fun `dispatcher override is visible in the metric`() {
+        val lines = run("dispatcher")
+        assertTrue(lines[0], lines[0].contains("DefaultDispatcher-worker") || lines[0].contains("Dispatchers.IO"))
+        assertTrue(lines[1], lines[1].contains("on demo-single"))
+    }
+
+    @Test
+    fun `deferred priority is reported but not gated on demand`() {
+        val lines = run("priority")
+        assertTrue(lines[0].contains("priority=CRITICAL"))
+        assertTrue(lines[1].contains("priority=DEFERRED"))
+    }
+
+    @Test
+    fun `failure is isolated from its sibling`() {
+        val lines = run("failure")
+        assertTrue(lines[0], lines[0].startsWith("failing threw: StartupExtensionException"))
+        assertTrue(lines[1], lines[1].contains("success=false") && lines[1].contains("demo failure"))
+        assertTrue(lines[2], lines[2].startsWith("sibling -> transient-async#"))
+    }
+
+    @Test
+    fun `abstract classes and cycles raise StartupExtensionException`() {
+        val lines = run("exceptions")
+        assertTrue(lines[0], lines[0].startsWith("abstract sync: StartupExtensionException"))
+        assertTrue(lines[1], lines[1].contains("Cycle detected"))
+        assertTrue(lines[2], lines[2].startsWith("abstract async: StartupExtensionException"))
+        assertTrue(lines[3], lines[3].contains("Cycle detected"))
+    }
 }

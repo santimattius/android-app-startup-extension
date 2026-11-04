@@ -3,7 +3,8 @@ package com.santimattius.android.sample.usecases
 import com.santimattius.android.sample.AsyncTestInitializer
 import com.santimattius.android.sample.DependencyOnlyInitializer
 import com.santimattius.android.sample.SyncTestInitializer
-import io.github.santimattius.android.startup.AppStartupInitializer
+import kotlinx.coroutines.async
+import kotlinx.coroutines.supervisorScope
 
 /** Use case C (basics): on-demand initialization, caching, eager flags and dependency ordering. */
 object OnDemandCases {
@@ -74,5 +75,67 @@ object OnDemandCases {
         },
     )
 
-    val all: List<DemoCase> = basic
+    val advanced: List<DemoCase> = listOf(
+        DemoCase(
+            "dispatcher", "Per-initializer dispatcher() override",
+            "Metrics report the dispatcher and thread create() really ran on: IO, a dedicated " +
+                "single thread, and the library default (Dispatchers.Default).",
+        ) { startup ->
+            listOf(IoDispatcherDemo::class.java, SingleThreadDispatcherDemo::class.java, TransientAsyncDemo::class.java)
+                .flatMap { cls ->
+                    startup.doInitialize<Any>(cls)
+                    val m = startup.lastMetricOf(cls)
+                    listOf("${cls.simpleName}: ${m?.dispatcherName} on ${m?.threadName}")
+                }
+        },
+        DemoCase(
+            "priority", "priority() values",
+            "The metric carries the declared priority. On-demand calls are never gated by the " +
+                "first frame: DEFERRED only delays eager startup roots.",
+        ) { startup ->
+            listOf(CriticalPriorityDemo::class.java, DeferredPriorityDemo::class.java).map { cls ->
+                val started = System.nanoTime()
+                startup.doInitialize<Any>(cls)
+                val ms = (System.nanoTime() - started) / 1_000_000
+                "${cls.simpleName}: priority=${startup.lastMetricOf(cls)?.priority} returned after $ms ms"
+            }
+        },
+        DemoCase(
+            "failure", "Failure isolation",
+            "One initializer throws while a sibling runs next to it. The failure surfaces as " +
+                "StartupExtensionException and in its metric; the sibling still succeeds.",
+        ) { startup ->
+            supervisorScope {
+                val bad = async { runCatching { startup.doInitialize<Any>(FailingAsyncDemo::class.java) } }
+                val ok = async { startup.doInitialize<String>(TransientAsyncDemo::class.java) }
+                val failure = bad.await().exceptionOrNull()
+                val bm = startup.lastMetricOf(FailingAsyncDemo::class.java)
+                listOf(
+                    "failing threw: ${failure?.let { it::class.simpleName }} (cause: ${failure?.cause?.message})",
+                    "failing metric: success=${bm?.success} error=${bm?.errorType}: ${bm?.errorMessage}",
+                    "sibling -> ${ok.await()}",
+                )
+            }
+        },
+        DemoCase(
+            "exceptions", "StartupExtensionException",
+            "Thrown for an abstract class, and wrapping the cycle error for circular dependencies.",
+        ) { startup ->
+            fun describe(label: String, block: () -> Unit) = runCatching(block).fold(
+                { "$label: no exception" },
+                { "$label: ${it::class.simpleName} / root: ${generateSequence(it) { t -> t.cause }.last().message}" },
+            )
+            listOf(
+                describe("abstract sync") { startup.doInitialize<Any>(AbstractSyncDemo::class.java) },
+                describe("sync cycle") { startup.doInitialize<Any>(CycleASyncDemo::class.java) },
+                runCatching { startup.doInitialize<Any>(AbstractAsyncDemo::class.java) }
+                    .exceptionOrNull().let { "abstract async: ${it?.let { e -> e::class.simpleName }}" },
+                runCatching { startup.doInitialize<Any>(CycleAAsyncDemo::class.java) }
+                    .exceptionOrNull().let { "async cycle: ${it?.let { e -> e::class.simpleName }} / root: " +
+                        it?.let { e -> generateSequence(e) { t -> t.cause }.last().message } },
+            )
+        },
+    )
+
+    val all: List<DemoCase> = basic + advanced
 }
