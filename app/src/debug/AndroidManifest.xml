@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <!-- Debug-only startup initializers used by the startup scenarios. -->
+        <provider
+            android:name="io.github.santimattius.android.startup.InitializationProvider"
+            android:authorities="${applicationId}.app-startup-extension"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="com.santimattius.android.sample.debug.DebugNormalAInitializer"
+                android:value="async-initializer" />
+            <meta-data
+                android:name="com.santimattius.android.sample.debug.DebugNormalBInitializer"
+                android:value="async-initializer" />
+            <meta-data
+                android:name="com.santimattius.android.sample.debug.DebugNormalCInitializer"
+                android:value="async-initializer" />
+            <meta-data
+                android:name="com.santimattius.android.sample.debug.DebugDeferredInitializer"
+                android:value="async-initializer" />
+        </provider>
+    </application>
+</manifest>

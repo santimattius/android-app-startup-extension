@@ -58,4 +58,15 @@ object SampleStartup {
         current = settings
         AppStartupInitializer.configure { settings.applyTo(this) }
     }
+
+    /** Enables dispatcher instrumentation for [block], then restores the exact captured settings. */
+    suspend fun <T> withDispatcherInstrumentation(block: suspend () -> T): T {
+        val previous = current
+        apply(previous.copy(dispatcherInstrumentation = true))
+        return try {
+            block()
+        } finally {
+            apply(previous)
+        }
+    }
 }
