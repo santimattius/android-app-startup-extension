@@ -18,7 +18,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -29,9 +28,8 @@ import com.santimattius.android.sample.scenario.ScenarioStore
 import com.santimattius.android.sample.scenario.StartupScenario
 import com.santimattius.android.sample.usecases.ProcessRestart
 import com.santimattius.android.sample.usecases.accumulate
-import com.santimattius.android.sample.usecases.collectWindow
+import com.santimattius.android.sample.usecases.replaySnapshot
 import io.github.santimattius.android.startup.AppStartupInitializer
-import kotlinx.coroutines.launch
 
 /** Debug only: pick a scenario, restart, and read the evidence of what it changed. */
 @Composable
@@ -42,7 +40,6 @@ fun ScenariosScreen(padding: PaddingValues) {
     val active = ScenarioStore.applied
     val metrics by remember { startup.metricsFlow.accumulate() }.collectAsStateWithLifecycle(emptyList())
     var replayed by remember { mutableStateOf<Int?>(null) }
-    val scope = rememberCoroutineScope()
 
     LazyColumn(
         Modifier.fillMaxSize().padding(padding),
@@ -77,10 +74,13 @@ fun ScenariosScreen(padding: PaddingValues) {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("Evidence", style = MaterialTheme.typography.titleMedium)
-                    Text("dispatcherSnapshots: ${startup.dispatcherSnapshots().values.joinToString {
-                        "${it.label}(peak=${it.peakConcurrency})"
-                    }.ifEmpty { "empty" }}", style = MaterialTheme.typography.bodySmall)
-                    Button(onClick = { scope.launch { replayed = startup.metricsFlow.collectWindow(300).size } }) {
+                    Text(
+                        "dispatcherSnapshots: ${startup.dispatcherSnapshots().values.joinToString {
+                            "${it.label}(peak=${it.peakConcurrency})"
+                        }.ifEmpty { "empty" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Button(onClick = { replayed = startup.metricsFlow.replaySnapshot().size }) {
                         Text("Count replayed metrics")
                     }
                     replayed?.let { Text("Late collector received $it metric(s)") }
