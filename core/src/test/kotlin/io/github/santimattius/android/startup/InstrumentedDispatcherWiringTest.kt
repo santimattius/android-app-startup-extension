@@ -15,13 +15,13 @@ import io.mockk.mockk
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -42,7 +42,6 @@ import kotlin.coroutines.CoroutineContext
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [Build.VERSION_CODES.S])
 class InstrumentedDispatcherWiringTest {
-
     private val context: Context = mockk(relaxed = true)
     private val packageManager: PackageManager = mockk(relaxed = true)
 
@@ -64,52 +63,60 @@ class InstrumentedDispatcherWiringTest {
     }
 
     @Test
-    fun `default config leaves dispatchers unwrapped and keeps no snapshot`() = runTest {
-        AppStartupInitializer.configure { defaultAsyncDispatcher = configDispatcher }
-        val initializer = AppStartupInitializer(context)
+    fun `default config leaves dispatchers unwrapped and keeps no snapshot`() =
+        runTest {
+            AppStartupInitializer.configure { defaultAsyncDispatcher = configDispatcher }
+            val initializer = AppStartupInitializer(context)
 
-        initializer.doInitialize<String>(PlainInit::class.java)
+            initializer.doInitialize<String>(PlainInit::class.java)
 
-        assertTrue(interceptors.getValue(PlainInit::class.java) === configDispatcher)
-        assertTrue(initializer.dispatcherSnapshots().isEmpty())
-        assertTrue(initializer.metricsFlow.replayCache.single().dispatcherName.isNotEmpty())
-    }
+            assertTrue(interceptors.getValue(PlainInit::class.java) === configDispatcher)
+            assertTrue(initializer.dispatcherSnapshots().isEmpty())
+            assertTrue(
+                initializer.metricsFlow.replayCache
+                    .single()
+                    .dispatcherName
+                    .isNotEmpty(),
+            )
+        }
 
     @Test
-    fun `enabled keeps precedence - per-instance dispatcher wins and is the one measured`() = runTest {
-        AppStartupInitializer.configure {
-            defaultAsyncDispatcher = configDispatcher
-            dispatcherInstrumentationEnabled = true
+    fun `enabled keeps precedence - per-instance dispatcher wins and is the one measured`() =
+        runTest {
+            AppStartupInitializer.configure {
+                defaultAsyncDispatcher = configDispatcher
+                dispatcherInstrumentationEnabled = true
+            }
+            val initializer = AppStartupInitializer(context)
+
+            initializer.doInitialize<String>(OverrideInit::class.java)
+            initializer.doInitialize<String>(PlainInit::class.java)
+
+            val override = interceptors.getValue(OverrideInit::class.java) as InstrumentedDispatcher
+            val snapshots = initializer.dispatcherSnapshots()
+            val configured = interceptors.getValue(PlainInit::class.java) as InstrumentedDispatcher
+            // Executor toString() carries live pool stats, so the label captured at wrap time is the key.
+            assertEquals(setOf(override.label, configured.label), snapshots.keys)
+            assertTrue(snapshots.values.all { it.totalDispatched >= 1 })
+            val names = initializer.metricsFlow.replayCache.map { it.dispatcherName }
+            assertEquals(listOf(override.label, configured.label), names)
         }
-        val initializer = AppStartupInitializer(context)
-
-        initializer.doInitialize<String>(OverrideInit::class.java)
-        initializer.doInitialize<String>(PlainInit::class.java)
-
-        val override = interceptors.getValue(OverrideInit::class.java) as InstrumentedDispatcher
-        val snapshots = initializer.dispatcherSnapshots()
-        val configured = interceptors.getValue(PlainInit::class.java) as InstrumentedDispatcher
-        // Executor toString() carries live pool stats, so the label captured at wrap time is the key.
-        assertEquals(setOf(override.label, configured.label), snapshots.keys)
-        assertTrue(snapshots.values.all { it.totalDispatched >= 1 })
-        val names = initializer.metricsFlow.replayCache.map { it.dispatcherName }
-        assertEquals(listOf(override.label, configured.label), names)
-    }
 
     @Test
-    fun `initializers sharing an effective dispatcher share one wrapper and entry`() = runTest {
-        AppStartupInitializer.configure {
-            defaultAsyncDispatcher = configDispatcher
-            dispatcherInstrumentationEnabled = true
+    fun `initializers sharing an effective dispatcher share one wrapper and entry`() =
+        runTest {
+            AppStartupInitializer.configure {
+                defaultAsyncDispatcher = configDispatcher
+                dispatcherInstrumentationEnabled = true
+            }
+            val initializer = AppStartupInitializer(context)
+
+            initializer.doInitialize<String>(PlainInit::class.java)
+            initializer.doInitialize<String>(OtherPlainInit::class.java)
+
+            assertTrue(interceptors.getValue(PlainInit::class.java) === interceptors.getValue(OtherPlainInit::class.java))
+            assertEquals(1, initializer.dispatcherSnapshots().size)
         }
-        val initializer = AppStartupInitializer(context)
-
-        initializer.doInitialize<String>(PlainInit::class.java)
-        initializer.doInitialize<String>(OtherPlainInit::class.java)
-
-        assertTrue(interceptors.getValue(PlainInit::class.java) === interceptors.getValue(OtherPlainInit::class.java))
-        assertEquals(1, initializer.dispatcherSnapshots().size)
-    }
 
     @Test
     fun `failing initializer keeps siblings alive, records error and does not corrupt counters`() {
@@ -154,8 +161,38 @@ class InstrumentedDispatcherWiringTest {
         assertTrue(metrics.getValue("GatedInit").success)
     }
 
+    @Test
+    fun `failed await retains active sibling ownership and ERROR across a second await`() {
+        AppStartupInitializer.configure { defaultAsyncDispatcher = configDispatcher }
+        val initializer = AppStartupInitializer(context)
+        stubManifest(FailingInit::class.java, GatedInit::class.java)
+
+        initializer.discoverAndInitialize(InitializationProvider::class.java)
+        val firstAwait = runCatching { runBlocking { initializer.awaitAllStartJobs() } }
+
+        assertTrue("The failing initializer must fail the first await", firstAwait.isFailure)
+        assertEquals(StartupState.ERROR, initializer.startupState.value)
+        assertFalse(
+            "An active sibling must remain owned after a failed await",
+            initializer.isAllStartedJobsDone(),
+        )
+
+        gate.countDown()
+        awaitMetrics(initializer, "FailingInit", "GatedInit")
+        runBlocking { awaitCondition { initializer.isAllStartedJobsDone() } }
+        assertTrue("The sibling must become done after its gate opens", initializer.isAllStartedJobsDone())
+
+        val secondAwait = runCatching { runBlocking { initializer.awaitAllStartJobs() } }
+
+        assertTrue("A second await must still observe the startup failure", secondAwait.isFailure)
+        assertEquals("ERROR is terminal for the failed startup batch", StartupState.ERROR, initializer.startupState.value)
+    }
+
     /** Waits (replay-aware, so it returns at once when already emitted) for every named initializer metric. */
-    private fun awaitMetrics(initializer: AppStartupInitializer, vararg names: String): Map<String, StartupMetric> =
+    private fun awaitMetrics(
+        initializer: AppStartupInitializer,
+        vararg names: String,
+    ): Map<String, StartupMetric> =
         runBlocking {
             withTimeout(5_000) {
                 names.forEach { name -> initializer.metricsFlow.first { it.initializerName == name } }
@@ -180,7 +217,11 @@ class InstrumentedDispatcherWiringTest {
         assertTrue(metrics.all { it.permitWaitMs <= it.queueDelayMs })
         assertTrue(
             "dispatcher queue must stay below the semaphore wait",
-            initializer.dispatcherSnapshots().values.single().maxQueueDelayMs < waiter.permitWaitMs,
+            initializer
+                .dispatcherSnapshots()
+                .values
+                .single()
+                .maxQueueDelayMs < waiter.permitWaitMs,
         )
     }
 
@@ -233,40 +274,42 @@ class InstrumentedDispatcherWiringTest {
     }
 
     @Test
-    fun `permitWaitMs is negligible without a cap and never exceeds queueDelayMs`() = runTest {
-        AppStartupInitializer.configure { defaultAsyncDispatcher = configDispatcher }
-        val initializer = AppStartupInitializer(context)
+    fun `permitWaitMs is negligible without a cap and never exceeds queueDelayMs`() =
+        runTest {
+            AppStartupInitializer.configure { defaultAsyncDispatcher = configDispatcher }
+            val initializer = AppStartupInitializer(context)
 
-        initializer.doInitialize<String>(PlainInit::class.java)
+            initializer.doInitialize<String>(PlainInit::class.java)
 
-        val metric = initializer.metricsFlow.replayCache.single()
-        // No semaphore is configured, so the acquire is a no-op: only clock granularity remains.
-        assertTrue("got ${metric.permitWaitMs}", metric.permitWaitMs < NEGLIGIBLE_MS)
-        assertTrue(metric.permitWaitMs <= metric.queueDelayMs)
-    }
+            val metric = initializer.metricsFlow.replayCache.single()
+            // No semaphore is configured, so the acquire is a no-op: only clock granularity remains.
+            assertTrue("got ${metric.permitWaitMs}", metric.permitWaitMs < NEGLIGIBLE_MS)
+            assertTrue(metric.permitWaitMs <= metric.queueDelayMs)
+        }
 
     @Test
-    fun `at cap of 1 the dependency completes before the dependent starts waiting for its permit`() = runTest {
-        AppStartupInitializer.configure {
-            maxConcurrentAsyncInitializers = 1
-            defaultAsyncDispatcher = configDispatcher
+    fun `at cap of 1 the dependency completes before the dependent starts waiting for its permit`() =
+        runTest {
+            AppStartupInitializer.configure {
+                maxConcurrentAsyncInitializers = 1
+                defaultAsyncDispatcher = configDispatcher
+            }
+            val tracer = RecordingStartupTracer()
+            val initializer = AppStartupInitializer(context, tracer = tracer)
+
+            val result = initializer.doInitialize<String>(DependentInit::class.java)
+
+            assertEquals("dependent(dependency)", result)
+            val dependencyDone = tracer.asyncEndIndex(StartupTraceNames.of("create", DependencyInit::class.java.name))
+            val dependentWait = tracer.asyncBeginIndex(StartupTraceNames.of("permitWait", DependentInit::class.java.name))
+            assertTrue("dependency create() must have run", dependencyDone >= 0)
+            assertTrue("dependent must request its permit", dependentWait >= 0)
+            assertTrue(
+                "dependency finished at $dependencyDone, dependent requested a permit at $dependentWait",
+                dependencyDone < dependentWait,
+            )
+            assertEquals(2, initializer.metricsFlow.replayCache.size)
         }
-        val tracer = RecordingStartupTracer()
-        val initializer = AppStartupInitializer(context, tracer = tracer)
-
-        val result = initializer.doInitialize<String>(DependentInit::class.java)
-
-        assertEquals("dependent(dependency)", result)
-        val dependencyDone = tracer.asyncEndIndex(StartupTraceNames.of("create", DependencyInit::class.java.name))
-        val dependentWait = tracer.asyncBeginIndex(StartupTraceNames.of("permitWait", DependentInit::class.java.name))
-        assertTrue("dependency create() must have run", dependencyDone >= 0)
-        assertTrue("dependent must request its permit", dependentWait >= 0)
-        assertTrue(
-            "dependency finished at $dependencyDone, dependent requested a permit at $dependentWait",
-            dependencyDone < dependentWait,
-        )
-        assertEquals(2, initializer.metricsFlow.replayCache.size)
-    }
 
     private suspend fun awaitCondition(condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
@@ -276,19 +319,32 @@ class InstrumentedDispatcherWiringTest {
         }
     }
 
-    private fun runCapOneScenario(initializer: AppStartupInitializer, tracer: RecordingStartupTracer): List<StartupMetric> {
+    private fun runCapOneScenario(
+        initializer: AppStartupInitializer,
+        tracer: RecordingStartupTracer,
+    ): List<StartupMetric> {
         stubManifest(HoldingInit::class.java, WaitingInit::class.java)
         initializer.discoverAndInitialize(InitializationProvider::class.java)
         assertTrue(firstRunning.await(5, TimeUnit.SECONDS))
         // Both initializers have requested a permit; only one can hold the single permit until the gate
         // opens, so the other one is parked on (or about to park on) the semaphore.
-        runBlocking { awaitCondition { tracer.events.count { it is RecordingStartupTracer.Event.AsyncBegin && it.name.startsWith("Startup::permitWait::") } == 2 } }
+        runBlocking {
+            awaitCondition {
+                tracer.events.count {
+                    it is RecordingStartupTracer.Event.AsyncBegin &&
+                        it.name.startsWith("Startup::permitWait::")
+                } ==
+                    2
+            }
+        }
         // Pure lower bound: the waiter requested its permit before this sleep started and cannot get it
         // before the gate opens, so its permit wait is at least this long regardless of scheduling.
         Thread.sleep(WAIT_FLOOR_MS)
         gate.countDown()
         runBlocking { initializer.awaitAllStartJobs() }
-        return initializer.metricsFlow.replayCache.toList().also { assertEquals(2, it.size) }
+        return initializer.metricsFlow.replayCache
+            .toList()
+            .also { assertEquals(2, it.size) }
     }
 
     private fun stubManifest(vararg classes: Class<*>) {
@@ -308,7 +364,8 @@ class InstrumentedDispatcherWiringTest {
         var gate = CountDownLatch(1)
 
         private fun named(name: String): ExecutorCoroutineDispatcher =
-            Executors.newFixedThreadPool(4) { r -> Thread(r, name).also { it.isDaemon = true } }
+            Executors
+                .newFixedThreadPool(4) { r -> Thread(r, name).also { it.isDaemon = true } }
                 .asCoroutineDispatcher()
 
         val configDispatcher = named("wiring-config")
@@ -324,7 +381,10 @@ class InstrumentedDispatcherWiringTest {
         val dispatched = CountDownLatch(1)
         private val parked = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
 
-        override fun dispatch(context: CoroutineContext, block: Runnable) {
+        override fun dispatch(
+            context: CoroutineContext,
+            block: Runnable,
+        ) {
             parked.add(block)
             dispatched.countDown()
         }
@@ -352,6 +412,7 @@ class InstrumentedDispatcherWiringTest {
     }
 
     private class PlainInit : Recording()
+
     private class OtherPlainInit : Recording()
 
     private class OverrideInit : Recording() {
@@ -380,5 +441,6 @@ class InstrumentedDispatcherWiringTest {
     }
 
     private class HoldingInit : HoldingBase()
+
     private class WaitingInit : HoldingBase()
 }
