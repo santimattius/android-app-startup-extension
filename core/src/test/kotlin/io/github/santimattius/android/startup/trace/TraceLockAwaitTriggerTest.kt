@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ProviderInfo
 import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import io.github.santimattius.android.startup.AppStartupInitializer
 import io.github.santimattius.android.startup.InitializationProvider
 import io.github.santimattius.android.startup.awaitAllStartJobs
@@ -17,10 +18,8 @@ import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -28,21 +27,28 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.LooperMode
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 /** Spec: startup-async-tracing P2 lockWait, awaitAll and onDemand trigger encoding (tasks 4.5-4.6). */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [Build.VERSION_CODES.S])
 class TraceLockAwaitTriggerTest {
-
     private val context: Context = mockk(relaxed = true)
     private val packageManager: PackageManager = mockk(relaxed = true)
     private val tracer = RecordingStartupTracer()
 
     private fun node(cls: Class<*>) = "Startup::${cls.name}"
-    private fun phase(phase: String, cls: Class<*>) = "Startup::$phase::${cls.name}"
+
+    private fun phase(
+        phase: String,
+        cls: Class<*>,
+    ) = "Startup::$phase::${cls.name}"
 
     @Before
     fun setUp() {
@@ -60,53 +66,68 @@ class TraceLockAwaitTriggerTest {
         AppStartupInitializer.configure { }
     }
 
-    private fun awaitEvent(predicate: () -> Boolean) = runBlocking {
-        withTimeout(5_000) { while (!predicate()) delay(5) }
+    private fun awaitEvent(predicate: () -> Boolean) {
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        var observed = predicate()
+        while (!observed && System.nanoTime() < deadlineNs) {
+            Thread.sleep(5)
+            observed = predicate()
+        }
+        assertTrue("Timed out waiting for trace event", observed)
     }
 
     @Test
-    fun `contended async lockWait spans the wait and an uncontended one is adjacent`() = runBlocking {
-        val initializer = AppStartupInitializer(context, Dispatchers.IO, tracer)
-        val holder = launch(Dispatchers.IO) { initializer.doInitialize<String>(AsyncHolder::class.java) }
-        holderEntered.await(5, TimeUnit.SECONDS)
-        val waiter = launch(Dispatchers.IO) { initializer.doInitialize<String>(AsyncOther::class.java) }
-        val wait = phase("lockWait::async", AsyncOther::class.java)
-        awaitEvent { tracer.asyncBeginIndex(wait) >= 0 }
+    fun `contended async lockWait spans the wait and an uncontended one is adjacent`() =
+        runBlocking {
+            val initializer = AppStartupInitializer(context, Dispatchers.IO, tracer)
+            val holder = launch(Dispatchers.IO) { initializer.doInitialize<String>(AsyncHolder::class.java) }
+            holderEntered.await(5, TimeUnit.SECONDS)
+            val waiter = launch(Dispatchers.IO) { initializer.doInitialize<String>(AsyncOther::class.java) }
+            val wait = phase("lockWait::async", AsyncOther::class.java)
+            awaitEvent { tracer.asyncBeginIndex(wait) >= 0 }
 
-        assertEquals("the waiter must still be queued behind the holder", -1, tracer.asyncEndIndex(wait))
-        gate.countDown()
-        holder.join()
-        waiter.join()
+            assertEquals("the waiter must still be queued behind the holder", -1, tracer.asyncEndIndex(wait))
+            gate.countDown()
+            holder.join()
+            waiter.join()
 
-        assertTrue(tracer.asyncEndIndex(wait) > tracer.asyncEndIndex(node(AsyncHolder::class.java)))
-        // The holder acquired a free lock: nothing happened between its lockWait begin and end.
-        val free = phase("lockWait::async", AsyncHolder::class.java)
-        assertEquals(tracer.asyncBeginIndex(free) + 1, tracer.asyncEndIndex(free))
-        assertTrue(tracer.asyncBalanced())
-    }
+            assertTrue(tracer.asyncEndIndex(wait) > tracer.asyncEndIndex(node(AsyncHolder::class.java)))
+            // The holder acquired a free lock: nothing happened between its lockWait begin and end.
+            val free = phase("lockWait::async", AsyncHolder::class.java)
+            assertEquals(tracer.asyncBeginIndex(free) + 1, tracer.asyncEndIndex(free))
+            assertTrue(tracer.asyncBalanced())
+        }
 
     @Test
-    fun `contended sync lockWait spans the wait on the waiting thread`() {
+    @LooperMode(LooperMode.Mode.PAUSED)
+    fun `background sync initialization traces lockWait on Android main`() {
         val initializer = AppStartupInitializer(context, Dispatchers.Default, tracer)
-        val holder = Thread { initializer.doInitialize<String>(SyncHolder::class.java) }.also { it.start() }
-        holderEntered.await(5, TimeUnit.SECONDS)
-        val waiter = Thread({ initializer.doInitialize<String>(SyncOther::class.java) }, "lock-waiter").also { it.start() }
+        val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "lock-waiter") }
+
+        try {
+            val result =
+                awaitWithMainLooper(
+                    executor.submit<String> {
+                        initializer.doInitialize(SyncOther::class.java)
+                    },
+                )
+            assertEquals("other", result)
+        } finally {
+            executor.shutdownNow()
+        }
+
         val wait = "Startup::lockWait::sync"
-        awaitEvent {
-            tracer.events.any { it is RecordingStartupTracer.Event.Begin && it.name == wait && it.thread == "lock-waiter" }
-        }
-
-        assertTrue("the waiter must still be blocked", tracer.events.none {
-            it is RecordingStartupTracer.Event.End && it.name == wait && it.thread == "lock-waiter"
-        })
-        gate.countDown()
-        holder.join(5_000)
-        waiter.join(5_000)
-
-        val waitEnd = tracer.events.indexOfFirst {
-            it is RecordingStartupTracer.Event.End && it.name == wait && it.thread == "lock-waiter"
-        }
-        assertTrue(waitEnd > tracer.syncEndIndex(node(SyncHolder::class.java)))
+        val mainThread = Looper.getMainLooper().thread.name
+        val waitBegin =
+            tracer.events.indexOfFirst {
+                it is RecordingStartupTracer.Event.Begin && it.name == wait && it.thread == mainThread
+            }
+        val waitEnd =
+            tracer.events.indexOfFirst {
+                it is RecordingStartupTracer.Event.End && it.name == wait && it.thread == mainThread
+            }
+        assertTrue("lockWait must be traced on Android main", waitBegin >= 0)
+        assertEquals("an uncontended main-thread lockWait must be adjacent", waitBegin + 1, waitEnd)
         assertTrue(tracer.syncBalanced())
     }
 
@@ -186,19 +207,30 @@ class TraceLockAwaitTriggerTest {
     }
 
     @Test
+    @LooperMode(LooperMode.Mode.PAUSED)
     fun `public entry points are onDemand while startup and the internal sync dependency path are not`() {
         AppStartupInitializer.configure { defaultAsyncDispatcher = Dispatchers.IO }
-        val bundle = Bundle().apply {
-            putString(AsyncWithSyncDep::class.java.name, "async-initializer")
-            putString(SyncOther::class.java.name, "sync-initializer")
-        }
+        val bundle =
+            Bundle().apply {
+                putString(AsyncWithSyncDep::class.java.name, "async-initializer")
+                putString(SyncOther::class.java.name, "sync-initializer")
+            }
         every {
             packageManager.getProviderInfo(any<ComponentName>(), any<Int>())
         } returns ProviderInfo().apply { metaData = bundle }
         val initializer = AppStartupInitializer(context, Dispatchers.IO, tracer)
 
         initializer.discoverAndInitialize(InitializationProvider::class.java)
-        runBlocking { initializer.awaitAllStartJobs() }
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            awaitWithMainLooper(
+                executor.submit<Unit> {
+                    runBlocking { initializer.awaitAllStartJobs() }
+                },
+            )
+        } finally {
+            executor.shutdownNow()
+        }
 
         assertTrue("the internal path must really have run", tracer.syncBeginIndex(node(SyncDep::class.java)) >= 0)
         assertTrue(tracer.events.none { it.name.startsWith("Startup::onDemand::") })
@@ -216,15 +248,25 @@ class TraceLockAwaitTriggerTest {
     }
 
     @Test
-    fun `disabled tracer records nothing for lockWait awaitAll and onDemand`() = runBlocking {
-        tracer.enabled = false
-        val initializer = AppStartupInitializer(context, Dispatchers.IO, tracer)
+    fun `disabled tracer records nothing for lockWait awaitAll and onDemand`() =
+        runBlocking {
+            tracer.enabled = false
+            val initializer = AppStartupInitializer(context, Dispatchers.IO, tracer)
 
-        initializer.initializeComponent(SyncOnDemand::class.java)
-        initializer.doInitialize<String>(AsyncOther::class.java)
-        initializer.awaitAllStartJobs()
+            initializer.initializeComponent(SyncOnDemand::class.java)
+            initializer.doInitialize<String>(AsyncOther::class.java)
+            initializer.awaitAllStartJobs()
 
-        assertTrue(tracer.events.isEmpty())
+            assertTrue(tracer.events.isEmpty())
+        }
+
+    private fun <T> awaitWithMainLooper(future: Future<T>): T {
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (!future.isDone && System.nanoTime() < deadlineNs) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(1)
+        }
+        return future.get(5, TimeUnit.SECONDS)
     }
 
     companion object {
@@ -266,6 +308,7 @@ class TraceLockAwaitTriggerTest {
 
     class AsyncWithSyncDep : StartupAsyncInitializer<String> {
         override fun syncDependencies(): List<Class<out StartupSyncInitializer<*>>> = listOf(SyncDep::class.java)
+
         override suspend fun create(context: Context) = "withDep"
     }
 }
