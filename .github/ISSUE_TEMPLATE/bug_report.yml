@@ -1,0 +1,37 @@
+---
+name: Bug report
+description: Report a reproducible defect in the library or sample application
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the defect and its user-visible impact.
+    validations:
+      required: true
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current behavior
+      description: >-
+        Describe what currently happens, including relevant failure modes.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: Describe the correct behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: >-
+        List the checks that demonstrate the defect and its correction.
+    validations:
+      required: true
