@@ -16,16 +16,19 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -35,6 +38,7 @@ import org.robolectric.annotation.Config
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.ContinuationInterceptor
 import kotlin.coroutines.CoroutineContext
 
@@ -274,6 +278,87 @@ class InstrumentedDispatcherWiringTest {
     }
 
     @Test
+    fun `cancellation while waiting for a permit emits one metric without creating or releasing an unowned permit`() {
+        AppStartupInitializer.configure { maxConcurrentAsyncInitializers = 1 }
+        val tracer = RecordingStartupTracer()
+        val initializer = AppStartupInitializer(context, tracer = tracer)
+        val permitWait = StartupTraceNames.of("permitWait", CancelledWhileWaitingInit::class.java.name)
+        CancelledWhileWaitingInit.createCalls.set(0)
+
+        runBlocking {
+            initializer.coroutinesEngine.acquireAsyncPermit() // hold the only permit
+            val waiting =
+                launch(Dispatchers.Default) {
+                    runCatching { initializer.doInitialize<String>(CancelledWhileWaitingInit::class.java) }
+                }
+            awaitCondition { tracer.asyncBeginIndex(permitWait) >= 0 }
+            waiting.cancel()
+            waiting.join()
+
+            val probe =
+                async(Dispatchers.Default) {
+                    initializer.coroutinesEngine.acquireAsyncPermit()
+                    true
+                }
+            val probeResult: Boolean? = withTimeoutOrNull(WAIT_FLOOR_MS) { probe.await() }
+            if (probeResult == null) {
+                probe.cancel()
+                probe.join()
+            } else {
+                initializer.coroutinesEngine.releaseAsyncPermit()
+            }
+            initializer.coroutinesEngine.releaseAsyncPermit()
+
+            assertNull("a cancelled waiter must not release a permit it never acquired", probeResult)
+        }
+
+        assertEquals(1, initializer.metricsFlow.replayCache.size)
+        with(initializer.metricsFlow.replayCache.single()) {
+            assertFalse(success)
+            assertTrue(wasCancelled)
+            assertEquals(0, concurrentActiveCount)
+            assertTrue(permitWaitMs <= queueDelayMs)
+            assertEquals("", threadName)
+            assertEquals(0L, startTimestampMs)
+            assertEquals(0L, endTimestampMs)
+        }
+        assertEquals(0, CancelledWhileWaitingInit.createCalls.get())
+    }
+
+    @Test
+    fun `initializer queued on its dispatcher is not active until its create body starts`() {
+        val parking = ParkingDispatcher()
+        QueuedActiveInit.parking = parking
+        AppStartupInitializer.configure {
+            asyncInitializerStrategy = AsyncInitializerStrategy.Concurrent
+            defaultAsyncDispatcher = Dispatchers.Default
+        }
+        val initializer = AppStartupInitializer(context)
+        stubManifest(QueuedActiveInit::class.java, ImmediateActiveInit::class.java)
+
+        initializer.discoverAndInitialize(InitializationProvider::class.java)
+        assertTrue(parking.dispatched.await(5, TimeUnit.SECONDS))
+        val immediateMetric =
+            runBlocking {
+                withTimeout(5_000) {
+                    initializer.metricsFlow.first {
+                        it.initializerName == "ImmediateActiveInit"
+                    }
+                }
+            }
+
+        parking.runParked()
+        runBlocking { initializer.awaitAllStartJobs() }
+        val queuedMetric =
+            initializer.metricsFlow.replayCache.single {
+                it.initializerName == "QueuedActiveInit"
+            }
+
+        assertEquals(1, immediateMetric.concurrentActiveCount)
+        assertEquals(1, queuedMetric.concurrentActiveCount)
+    }
+
+    @Test
     fun `permitWaitMs is negligible without a cap and never exceeds queueDelayMs`() =
         runTest {
             AppStartupInitializer.configure { defaultAsyncDispatcher = configDispatcher }
@@ -392,6 +477,31 @@ class InstrumentedDispatcherWiringTest {
         fun runParked() {
             generateSequence { parked.poll() }.forEach { it.run() }
         }
+    }
+
+    private class CancelledWhileWaitingInit : StartupAsyncInitializer<String> {
+        override suspend fun create(context: Context): String {
+            createCalls.incrementAndGet()
+            return "created"
+        }
+
+        companion object {
+            val createCalls = AtomicInteger(0)
+        }
+    }
+
+    private class QueuedActiveInit : StartupAsyncInitializer<String> {
+        override fun dispatcher(): CoroutineDispatcher = parking
+
+        override suspend fun create(context: Context): String = "queued"
+
+        companion object {
+            lateinit var parking: ParkingDispatcher
+        }
+    }
+
+    private class ImmediateActiveInit : StartupAsyncInitializer<String> {
+        override suspend fun create(context: Context): String = "immediate"
     }
 
     private class DependencyInit : StartupAsyncInitializer<String> {
