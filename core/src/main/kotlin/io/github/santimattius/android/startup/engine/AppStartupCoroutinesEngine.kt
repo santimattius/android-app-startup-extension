@@ -8,8 +8,6 @@ import io.github.santimattius.android.startup.trace.SystemStartupTracer
 import io.github.santimattius.android.startup.trace.closeAsyncSection
 import io.github.santimattius.android.startup.trace.mark
 import io.github.santimattius.android.startup.trace.openAsyncSection
-import java.util.Collections
-import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -24,6 +22,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeout
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.CoroutineContext
 
 /**
@@ -63,7 +63,6 @@ internal class AppStartupCoroutinesEngine(
     private val cap: Int? = null,
     private val tracer: StartupTracer = SystemStartupTracer,
 ) : CoroutineScope {
-
     private val dispatcher: CoroutineDispatcher = coroutineDispatcher
     private val supervisorJob = SupervisorJob()
 
@@ -105,14 +104,37 @@ internal class AppStartupCoroutinesEngine(
     /** Serializes read+emit so a stale counter value can never be recorded after a newer one. */
     private val counterLock = Any()
 
-    private inline fun emitCounter(name: String, value: () -> Int) {
+    private inline fun emitCounter(
+        name: String,
+        value: () -> Int,
+    ) {
         if (tracer.isAsyncEnabled) synchronized(counterLock) { tracer.setCounter(name, value().toLong()) }
     }
 
     /** Publishes [state] and, only on an actual transition, records a zero-length marker. */
     private fun transitionTo(state: StartupState) {
-        if (_startupState.getAndUpdate { state } == state) return
-        tracer.mark { StartupTraceNames.of("marker::${state.name}", null) }
+        val previousState =
+            _startupState.getAndUpdate { currentState ->
+                if (currentState == StartupState.ERROR && state == StartupState.COMPLETED) currentState else state
+            }
+        val nextState =
+            if (previousState == StartupState.ERROR && state == StartupState.COMPLETED) {
+                previousState
+            } else {
+                state
+            }
+        if (previousState == nextState) return
+        tracer.mark { StartupTraceNames.of("marker::${nextState.name}", null) }
+    }
+
+    /**
+     * Retains failed jobs while any sibling is active, so their ownership remains observable until
+     * the complete startup batch reaches a terminal state.
+     */
+    private fun clearStartJobsWhenAllTerminal() {
+        synchronized(_startJobs) {
+            if (_startJobs.all { it.isCompleted }) _startJobs.clear()
+        }
     }
 
     private fun markCancel() = tracer.mark { StartupTraceNames.of("marker::cancel", null) }
@@ -196,7 +218,7 @@ internal class AppStartupCoroutinesEngine(
             transitionTo(StartupState.ERROR)
             throw e
         } finally {
-            _startJobs.clear()
+            clearStartJobsWhenAllTerminal()
             tracer.closeAsyncSection(span)
         }
     }
