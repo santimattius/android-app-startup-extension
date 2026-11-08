@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.PackageManager.GET_META_DATA
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
 import android.os.StrictMode
 import android.os.SystemClock
@@ -35,6 +37,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.Volatile
@@ -219,7 +222,7 @@ class AppStartupInitializer internal constructor(
      */
     fun <T> doInitialize(component: Class<out StartupSyncInitializer<*>>): T =
         tracer.section({ StartupTraceNames.of("onDemand", component.name) }) {
-            initializeUnderSyncLock<T>(component)
+            onMainThread { initializeUnderSyncLock<T>(component) }
         }
 
     /**
@@ -236,6 +239,39 @@ class AppStartupInitializer internal constructor(
                 result = doInitialize<T>(component, HashSet())
             }
         }
+        return result as T
+    }
+
+    /**
+     * Runs synchronous initialization on Android's main thread while keeping the caller synchronous.
+     * A background caller waits for its result or failure; the main thread executes directly and is
+     * never blocked waiting on itself.
+     */
+    private fun <T> onMainThread(block: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) return block()
+
+        val completed = CountDownLatch(1)
+        var result: T? = null
+        var failure: Throwable? = null
+        val posted = Handler(Looper.getMainLooper()).post {
+            try {
+                result = block()
+            } catch (throwable: Throwable) {
+                failure = throwable
+            } finally {
+                completed.countDown()
+            }
+        }
+        check(posted) { "Unable to schedule synchronous initialization on the main thread." }
+
+        try {
+            completed.await()
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IllegalStateException("Interrupted while waiting for synchronous initialization.", interrupted)
+        }
+        failure?.let { throw it }
+        @Suppress("UNCHECKED_CAST")
         return result as T
     }
 
@@ -476,7 +512,9 @@ class AppStartupInitializer internal constructor(
                         // before this async initializer's create() is invoked.
                         asyncInitializer.syncDependencies()
                             .filterNot(initialized::containsKey)
-                            .forEach { initializeUnderSyncLock<Any>(it) }
+                            .forEach { dependency ->
+                                onMainThread { initializeUnderSyncLock<Any>(dependency) }
+                            }
                     }
 
                     StartupExtensionLogger.info { "Initializing ${component.name}" }
