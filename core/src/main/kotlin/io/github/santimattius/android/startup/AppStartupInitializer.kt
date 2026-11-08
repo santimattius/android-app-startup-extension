@@ -26,6 +26,7 @@ import io.github.santimattius.android.startup.trace.mark
 import io.github.santimattius.android.startup.trace.openAsyncSection
 import io.github.santimattius.android.startup.trace.openSection
 import io.github.santimattius.android.startup.trace.section
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharedFlow
@@ -35,6 +36,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.Volatile
 
 /**
@@ -115,7 +117,15 @@ class AppStartupInitializer internal constructor(
      */
     val metricsFlow: SharedFlow<StartupMetric> get() = metricsBus.metricsFlow
 
+    private data class AsyncInFlightKey(
+        val component: Class<out StartupAsyncInitializer<*>>,
+        val startupGraph: Boolean,
+    )
+
     private val initialized = ConcurrentHashMap<Class<*>, Any>()
+    private val asyncInFlight = ConcurrentHashMap<AsyncInFlightKey, CompletableDeferred<Any>>()
+    private val transientAsyncStartupComponents = ConcurrentHashMap<Class<out StartupAsyncInitializer<*>>, Any>()
+    private val pendingAsyncStartupRoots = AtomicInteger(0)
     private val syncDiscovered: MutableSet<Class<out StartupSyncInitializer<*>>> = CopyOnWriteArraySet()
     private val asyncDiscovered: MutableSet<Class<out StartupAsyncInitializer<*>>> = CopyOnWriteArraySet()
 
@@ -253,7 +263,7 @@ class AppStartupInitializer internal constructor(
         return tracer.asyncSection({ StartupTraceNames.of("onDemand", component.name) }) {
             tracer.asyncSection({ StartupTraceNames.of("lockWait::async", component.name) }) { mutex.lock() }
             try {
-                initialized[component] ?: doAsyncInitialize(component, HashSet())
+                initialized[component] ?: doAsyncInitialize(component, HashSet(), startupGraph = false)
             } finally {
                 mutex.unlock()
             }
@@ -425,29 +435,42 @@ class AppStartupInitializer internal constructor(
      */
     private suspend fun <T> doAsyncInitialize(
         component: Class<out StartupAsyncInitializer<*>>,
-        initializing: MutableSet<Class<*>>
+        initializing: MutableSet<Class<*>>,
+        startupGraph: Boolean,
     ): T {
         // Async slice: this node can suspend and resume on another thread, so a thread-bound
         // Trace.beginSection would corrupt the stack. The cookie is captured at begin.
         val nodeSpan = tracer.openAsyncSection { StartupTraceNames.of(null, component.name) }
+        val completion = CompletableDeferred<Any>()
+        var inFlightKey: AsyncInFlightKey? = null
+        var shouldRetain = true
         try {
             require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
+            initialized[component]?.let { return it as T }
+            if (startupGraph) {
+                transientAsyncStartupComponents[component]?.let { return it as T }
+            }
 
-            var shouldRetain = true
-            val result = initialized.getOrPut(component) {
-                requireConcreteClass(component)
+            requireConcreteClass(component)
+            shouldRetain =
+                (registry.peek(component) as StartupAsyncInitializer<*>).retainAfterStartup()
+            val key = AsyncInFlightKey(component, startupGraph && !shouldRetain)
+            inFlightKey = key
+            val existingCompletion = asyncInFlight.putIfAbsent(key, completion)
+            if (existingCompletion != null) return existingCompletion.await() as T
+
+            val result = run {
                 initializing.add(component)
                 try {
                     val initializer = registry.take(component)
                         .also { it as StartupAsyncInitializer<*> }
 
                     val asyncInitializer = (initializer as StartupAsyncInitializer<*>)
-                    shouldRetain = asyncInitializer.retainAfterStartup()
 
                     tracer.asyncSection({ StartupTraceNames.of("deps", component.name) }) {
                         asyncInitializer.dependencies()
                             .filterNot(initialized::containsKey)
-                            .forEach { doAsyncInitialize<Any>(it, initializing) }
+                            .forEach { doAsyncInitialize<Any>(it, initializing, startupGraph) }
 
                         // Resolve cross-type dependencies: sync initializers that must complete
                         // before this async initializer's create() is invoked.
@@ -548,10 +571,19 @@ class AppStartupInitializer internal constructor(
                 } finally {
                     initializing.remove(component)
                 }
-            } as T
-            if (!shouldRetain) initialized.remove(component)
-            return result
+            }
+            if (shouldRetain) {
+                initialized[component] = result
+            } else if (startupGraph && pendingAsyncStartupRoots.get() > 0) {
+                transientAsyncStartupComponents[component] = result
+            }
+            completion.complete(result)
+            return result as T
+        } catch (throwable: Throwable) {
+            completion.completeExceptionally(throwable)
+            throw throwable
         } finally {
+            inFlightKey?.let { asyncInFlight.remove(it, completion) }
             tracer.closeAsyncSection(nodeSpan)
         }
     }
@@ -712,7 +744,12 @@ class AppStartupInitializer internal constructor(
             )
         }
         val toLaunch = when (config.asyncInitializerStrategy) {
-            is AsyncInitializerStrategy.Concurrent -> asyncDiscovered
+            is AsyncInitializerStrategy.Concurrent -> {
+                tracer.section({ StartupTraceNames.of("resolveGraph::validateConcurrent", null) }) {
+                    asyncValidateAndGetRoots(asyncDiscovered, includeTransitiveDependencies = true)
+                }
+                asyncDiscovered
+            }
             is AsyncInitializerStrategy.Validated ->
                 tracer.section({ StartupTraceNames.of("resolveGraph::validateRoots", null) }) {
                     asyncValidateAndGetRoots(asyncDiscovered)
@@ -729,11 +766,18 @@ class AppStartupInitializer internal constructor(
         val (deferredRoots, eagerRoots) = toLaunch.partition {
             effective[it] == StartupPriority.DEFERRED
         }
+        val startupRootCount = eagerRoots.size + deferredRoots.size
+        if (startupRootCount > 0) pendingAsyncStartupRoots.addAndGet(startupRootCount)
 
         eagerRoots.forEach { initializer ->
             // Each job gets its own initializing set: cycle detection is per-chain,
             // and sharing a mutable set across concurrent coroutines is a data race.
-            coroutinesEngine.launchStartJob { doAsyncInitialize<Any>(initializer, HashSet()) }
+            coroutinesEngine.launchStartJob {
+                doAsyncInitialize<Any>(initializer, HashSet(), startupGraph = true)
+            }
+        }
+        coroutinesEngine.startJobs.takeLast(eagerRoots.size).forEach { job ->
+            job.invokeOnCompletion { completeAsyncStartupRoot() }
         }
 
         if (deferredRoots.isNotEmpty()) {
@@ -757,9 +801,18 @@ class AppStartupInitializer internal constructor(
                     tracer.mark {
                         StartupTraceNames.of(if (signalled != null) "marker::deferredSignal" else "marker::deferredTimeout", fqn)
                     }
-                    doAsyncInitialize<Any>(initializer, HashSet())
+                    doAsyncInitialize<Any>(initializer, HashSet(), startupGraph = true)
                 }
             }
+            coroutinesEngine.deferredStartJobs.takeLast(deferredRoots.size).forEach { job ->
+                job.invokeOnCompletion { completeAsyncStartupRoot() }
+            }
+        }
+    }
+
+    private fun completeAsyncStartupRoot() {
+        if (pendingAsyncStartupRoots.decrementAndGet() == 0) {
+            transientAsyncStartupComponents.clear()
         }
     }
 
@@ -767,7 +820,9 @@ class AppStartupInitializer internal constructor(
      * Validates the async-to-async dependency graph (built from [StartupAsyncInitializer.dependencies]
      * only — [StartupAsyncInitializer.syncDependencies] are excluded because all sync initializers
      * discovered in the manifest have already completed before this is called) and returns the
-     * **root** nodes: async initializers that no other async initializer depends on.
+     * **root** nodes: async initializers that no other async initializer depends on. When
+     * [includeTransitiveDependencies] is true, validation follows dependencies absent from manifest
+     * metadata too; returned roots remain restricted to [discovered].
      *
      * Cycle detection uses Kahn's algorithm as a by-product: if not all nodes are processed,
      * the remaining ones form a cycle. The exception is thrown before any coroutine is launched
@@ -780,19 +835,33 @@ class AppStartupInitializer internal constructor(
      */
     internal fun asyncValidateAndGetRoots(
         discovered: Set<Class<out StartupAsyncInitializer<*>>>,
+        includeTransitiveDependencies: Boolean = false,
     ): Set<Class<out StartupAsyncInitializer<*>>> {
+        val graphNodes = mutableSetOf<Class<out StartupAsyncInitializer<*>>>()
+        if (includeTransitiveDependencies) {
+            val toVisit = ArrayDeque(discovered)
+            while (toVisit.isNotEmpty()) {
+                val current = toVisit.removeFirst()
+                if (!graphNodes.add(current)) continue
+                val initializer = registry.peek(current) as StartupAsyncInitializer<*>
+                toVisit.addAll(initializer.dependencies())
+            }
+        } else {
+            graphNodes.addAll(discovered)
+        }
+
         val inDegree = mutableMapOf<Class<out StartupAsyncInitializer<*>>, Int>()
         val adjacency = mutableMapOf<Class<out StartupAsyncInitializer<*>>, MutableList<Class<out StartupAsyncInitializer<*>>>>()
         val allDeclaredDependencies = mutableSetOf<Class<out StartupAsyncInitializer<*>>>()
 
-        discovered.forEach { cls ->
+        graphNodes.forEach { cls ->
             inDegree.getOrPut(cls) { 0 }
             adjacency.getOrPut(cls) { mutableListOf() }
 
             registry.peek(cls)
                 .let { it as StartupAsyncInitializer<*> }
                 .dependencies()
-                .filter { it in discovered }
+                .filter { it in graphNodes }
                 .forEach { dep ->
                     allDeclaredDependencies.add(dep)
                     adjacency.getOrPut(dep) { mutableListOf() }.add(cls)
@@ -815,8 +884,8 @@ class AppStartupInitializer internal constructor(
             }
         }
 
-        if (processed.size != discovered.size) {
-            val cycleNodes = (discovered - processed.toSet()).joinToString(", ") { it.simpleName }
+        if (processed.size != graphNodes.size) {
+            val cycleNodes = (graphNodes - processed.toSet()).joinToString(", ") { it.simpleName }
             throw StartupExtensionException("Cycle detected in async initializers: [$cycleNodes]")
         }
 
