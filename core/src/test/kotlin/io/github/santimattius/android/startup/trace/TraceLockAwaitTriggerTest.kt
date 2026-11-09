@@ -99,35 +99,31 @@ class TraceLockAwaitTriggerTest {
         }
 
     @Test
-    @LooperMode(LooperMode.Mode.PAUSED)
-    fun `background sync initialization traces lockWait on Android main`() {
+    fun `background sync initialization traces lockWait on its caller thread`() {
         val initializer = AppStartupInitializer(context, Dispatchers.Default, tracer)
-        val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "lock-waiter") }
+        val callerThread = "lock-waiter"
+        val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, callerThread) }
 
         try {
-            val result =
-                awaitWithMainLooper(
-                    executor.submit<String> {
-                        initializer.doInitialize(SyncOther::class.java)
-                    },
-                )
-            assertEquals("other", result)
+            assertEquals(
+                "other",
+                executor.submit<String> { initializer.doInitialize(SyncOther::class.java) }.get(5, TimeUnit.SECONDS),
+            )
         } finally {
             executor.shutdownNow()
         }
 
         val wait = "Startup::lockWait::sync"
-        val mainThread = Looper.getMainLooper().thread.name
         val waitBegin =
             tracer.events.indexOfFirst {
-                it is RecordingStartupTracer.Event.Begin && it.name == wait && it.thread == mainThread
+                it is RecordingStartupTracer.Event.Begin && it.name == wait && it.thread == callerThread
             }
         val waitEnd =
             tracer.events.indexOfFirst {
-                it is RecordingStartupTracer.Event.End && it.name == wait && it.thread == mainThread
+                it is RecordingStartupTracer.Event.End && it.name == wait && it.thread == callerThread
             }
-        assertTrue("lockWait must be traced on Android main", waitBegin >= 0)
-        assertEquals("an uncontended main-thread lockWait must be adjacent", waitBegin + 1, waitEnd)
+        assertTrue("lockWait must be traced on the sync caller thread", waitBegin >= 0)
+        assertEquals("an uncontended caller-thread lockWait must be adjacent", waitBegin + 1, waitEnd)
         assertTrue(tracer.syncBalanced())
     }
 

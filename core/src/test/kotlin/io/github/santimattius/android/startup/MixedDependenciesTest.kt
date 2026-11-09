@@ -1,7 +1,6 @@
 package io.github.santimattius.android.startup
 
 import android.content.Context
-import android.os.Looper
 import io.github.santimattius.android.startup.initializer.StartupAsyncInitializer
 import io.github.santimattius.android.startup.initializer.StartupSyncInitializer
 import io.mockk.mockk
@@ -17,12 +16,8 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows
 import org.robolectric.annotation.Config
-import org.robolectric.annotation.LooperMode
 import java.util.concurrent.Executors
-import java.util.concurrent.Future
-import java.util.concurrent.TimeUnit
 
 /**
  * Spec 4.1 — Mixed sync/async dependencies.
@@ -33,7 +28,6 @@ import java.util.concurrent.TimeUnit
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
-@LooperMode(LooperMode.Mode.PAUSED)
 class MixedDependenciesTest {
 
     private val context: Context = mockk(relaxed = true)
@@ -79,35 +73,27 @@ class MixedDependenciesTest {
         }
 
     @Test
-    fun `sync dependency resolved from background async initialization creates on Android main`() {
+    fun `sync dependency resolved from background async initialization creates in the current coroutine context`() {
         val executor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "async-initializer-caller")
         }
+        var callerThread: Thread? = null
 
         try {
-            val result = awaitWithMainLooper(
+            val result =
                 executor.submit<String> {
+                    callerThread = Thread.currentThread()
                     runBlocking {
                         initializer.doInitialize<String>(BackgroundAsyncInitializer::class.java)
                     }
-                },
-            )
+                }.get()
 
             assertEquals("async-created", result)
-            assertSame(Looper.getMainLooper().thread, syncDependencyCreateThread)
-            assertTrue(asyncCreateThread !== Looper.getMainLooper().thread)
+            assertSame(callerThread, syncDependencyCreateThread)
+            assertTrue(asyncCreateThread !== syncDependencyCreateThread)
         } finally {
             executor.shutdownNow()
         }
-    }
-
-    private fun <T> awaitWithMainLooper(future: Future<T>): T {
-        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-        while (!future.isDone && System.nanoTime() < deadlineNs) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            Thread.sleep(1)
-        }
-        return future.get(5, TimeUnit.SECONDS)
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
