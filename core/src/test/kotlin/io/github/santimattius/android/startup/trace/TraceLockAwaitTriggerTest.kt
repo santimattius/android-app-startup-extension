@@ -31,9 +31,12 @@ import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /** Spec: startup-async-tracing P2 lockWait, awaitAll and onDemand trigger encoding (tasks 4.5-4.6). */
 @RunWith(RobolectricTestRunner::class)
@@ -54,6 +57,7 @@ class TraceLockAwaitTriggerTest {
     fun setUp() {
         gate = CountDownLatch(1)
         holderEntered = CountDownLatch(1)
+        cycleDependenciesEntered = CountDownLatch(2)
         every { context.applicationContext } returns context
         every { context.classLoader } returns javaClass.classLoader
         every { context.packageName } returns "io.github.santimattius.test"
@@ -99,36 +103,143 @@ class TraceLockAwaitTriggerTest {
         }
 
     @Test
-    @LooperMode(LooperMode.Mode.PAUSED)
-    fun `background sync initialization traces lockWait on Android main`() {
+    fun `background sync initialization traces lockWait on its caller thread`() {
         val initializer = AppStartupInitializer(context, Dispatchers.Default, tracer)
-        val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "lock-waiter") }
+        val callerThread = "lock-waiter"
+        val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, callerThread) }
 
         try {
-            val result =
-                awaitWithMainLooper(
-                    executor.submit<String> {
-                        initializer.doInitialize(SyncOther::class.java)
-                    },
-                )
-            assertEquals("other", result)
+            assertEquals(
+                "other",
+                executor.submit<String> { initializer.doInitialize(SyncOther::class.java) }.get(5, TimeUnit.SECONDS),
+            )
         } finally {
             executor.shutdownNow()
         }
 
         val wait = "Startup::lockWait::sync"
-        val mainThread = Looper.getMainLooper().thread.name
         val waitBegin =
             tracer.events.indexOfFirst {
-                it is RecordingStartupTracer.Event.Begin && it.name == wait && it.thread == mainThread
+                it is RecordingStartupTracer.Event.Begin && it.name == wait && it.thread == callerThread
             }
         val waitEnd =
             tracer.events.indexOfFirst {
-                it is RecordingStartupTracer.Event.End && it.name == wait && it.thread == mainThread
+                it is RecordingStartupTracer.Event.End && it.name == wait && it.thread == callerThread
             }
-        assertTrue("lockWait must be traced on Android main", waitBegin >= 0)
-        assertEquals("an uncontended main-thread lockWait must be adjacent", waitBegin + 1, waitEnd)
+        assertTrue("lockWait must be traced on the sync caller thread", waitBegin >= 0)
+        assertEquals("an uncontended caller-thread lockWait must be adjacent", waitBegin + 1, waitEnd)
         assertTrue(tracer.syncBalanced())
+    }
+
+    @Test
+    fun `contended sync lockWait remains balanced after ownership is released`() {
+        val initializer = AppStartupInitializer(context, Dispatchers.Default, tracer)
+        val executor = newExecutor("trace-sync-contention")
+        val ownerThread = AtomicReference<Thread>()
+        val waiterThread = AtomicReference<Thread>()
+        val waiterStarted = CountDownLatch(1)
+
+        try {
+            val owner =
+                executor.submit<String> {
+                    ownerThread.set(Thread.currentThread())
+                    initializer.doInitialize(SyncHolder::class.java)
+                }
+            assertTrue(holderEntered.await(5, TimeUnit.SECONDS))
+            val waiter =
+                executor.submit<String> {
+                    waiterThread.set(Thread.currentThread())
+                    waiterStarted.countDown()
+                    initializer.doInitialize(SyncHolder::class.java)
+                }
+            assertTrue(waiterStarted.await(5, TimeUnit.SECONDS))
+            waitForWaitingState(waiterThread)
+            gate.countDown()
+
+            assertEquals("holder", owner.get(5, TimeUnit.SECONDS))
+            assertEquals("holder", waiter.get(5, TimeUnit.SECONDS))
+            val ownerNodeEnd =
+                tracer.events.indexOfLast {
+                    it is RecordingStartupTracer.Event.End &&
+                        it.name == node(SyncHolder::class.java) &&
+                        it.thread == ownerThread.get().name
+                }
+            val waiterLockWaitEnd =
+                tracer.events.indexOfLast {
+                    it is RecordingStartupTracer.Event.End &&
+                        it.name == "Startup::lockWait::sync" &&
+                        it.thread == waiterThread.get().name
+                }
+            assertTrue("waiter lockWait must span real ownership contention", waiterLockWaitEnd > ownerNodeEnd)
+            assertTrue(tracer.syncBalanced())
+        } finally {
+            gate.countDown()
+            shutdown(executor)
+        }
+    }
+
+    @Test
+    fun `sync lockWait remains balanced after cross-thread cycle failure`() {
+        val initializer = AppStartupInitializer(context, Dispatchers.Default, tracer)
+        val executor = newExecutor("trace-sync-cycle")
+
+        try {
+            val first = executor.submit<String> { initializer.doInitialize(CrossThreadCycleA::class.java) }
+            val second = executor.submit<String> { initializer.doInitialize(CrossThreadCycleB::class.java) }
+
+            val firstFailure = runCatching { first.get(5, TimeUnit.SECONDS) }.exceptionOrNull()
+            val secondFailure = runCatching { second.get(5, TimeUnit.SECONDS) }.exceptionOrNull()
+            assertTrue(firstFailure is ExecutionException)
+            assertTrue(secondFailure is ExecutionException)
+            assertTrue(
+                firstFailure?.hasCauseMessage("Cross-thread cycle detected") == true ||
+                    secondFailure?.hasCauseMessage("Cross-thread cycle detected") == true,
+            )
+            assertTrue(tracer.syncBalanced())
+        } finally {
+            shutdown(executor)
+        }
+    }
+
+    @Test
+    fun `sync lockWait remains balanced when a waiting caller is interrupted`() {
+        val initializer = AppStartupInitializer(context, Dispatchers.Default, tracer)
+        val executor = newExecutor("trace-sync-interrupt")
+        val waiterThread = AtomicReference<Thread>()
+        val waiterStarted = CountDownLatch(1)
+
+        try {
+            val owner = executor.submit<String> { initializer.doInitialize(SyncHolder::class.java) }
+            assertTrue(holderEntered.await(5, TimeUnit.SECONDS))
+            val waiter =
+                executor.submit<String> {
+                    waiterThread.set(Thread.currentThread())
+                    waiterStarted.countDown()
+                    initializer.doInitialize(SyncHolder::class.java)
+                }
+            assertTrue(waiterStarted.await(5, TimeUnit.SECONDS))
+            waitForWaitingState(waiterThread)
+            waiterThread.get().interrupt()
+
+            val failure = runCatching { waiter.get(5, TimeUnit.SECONDS) }.exceptionOrNull()
+            assertTrue(failure is ExecutionException)
+            assertTrue(failure?.cause is IllegalStateException)
+            assertTrue(failure?.cause?.cause is InterruptedException)
+            assertTrue(
+                "interrupted waiter must close lockWait before the owner is released",
+                tracer.events.any {
+                    it is RecordingStartupTracer.Event.End &&
+                        it.name == "Startup::lockWait::sync" &&
+                        it.thread == waiterThread.get().name
+                },
+            )
+            gate.countDown()
+            assertEquals("holder", owner.get(5, TimeUnit.SECONDS))
+            assertTrue(tracer.syncBalanced())
+        } finally {
+            gate.countDown()
+            shutdown(executor)
+        }
     }
 
     @Test
@@ -260,6 +371,35 @@ class TraceLockAwaitTriggerTest {
             assertTrue(tracer.events.isEmpty())
         }
 
+    private fun waitForWaitingState(thread: AtomicReference<Thread>) {
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (thread.get().state != Thread.State.WAITING && System.nanoTime() < deadlineNs) {
+            Thread.yield()
+        }
+        assertEquals(Thread.State.WAITING, thread.get().state)
+    }
+
+    private fun Throwable.hasCauseMessage(expected: String): Boolean {
+        var current: Throwable? = this
+        while (current != null) {
+            if (current.message?.contains(expected) == true) return true
+            current = current.cause
+        }
+        return false
+    }
+
+    private fun newExecutor(name: String): java.util.concurrent.ExecutorService {
+        val sequence = AtomicInteger()
+        return Executors.newFixedThreadPool(2) { runnable ->
+            Thread(runnable, "$name-${sequence.incrementAndGet()}")
+        }
+    }
+
+    private fun shutdown(executor: java.util.concurrent.ExecutorService) {
+        executor.shutdownNow()
+        assertTrue("executor did not terminate", executor.awaitTermination(5, TimeUnit.SECONDS))
+    }
+
     private fun <T> awaitWithMainLooper(future: Future<T>): T {
         val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
         while (!future.isDone && System.nanoTime() < deadlineNs) {
@@ -275,6 +415,9 @@ class TraceLockAwaitTriggerTest {
 
         @Volatile
         var holderEntered = CountDownLatch(1)
+
+        @Volatile
+        var cycleDependenciesEntered = CountDownLatch(2)
 
         private fun hold() {
             holderEntered.countDown()
@@ -292,6 +435,26 @@ class TraceLockAwaitTriggerTest {
 
     class SyncOnDemand : StartupSyncInitializer<String> {
         override fun create(context: Context) = "demand"
+    }
+
+    class CrossThreadCycleA : StartupSyncInitializer<String> {
+        override fun create(context: Context) = "a"
+
+        override fun dependencies(): List<Class<out StartupSyncInitializer<*>>> {
+            cycleDependenciesEntered.countDown()
+            check(cycleDependenciesEntered.await(5, TimeUnit.SECONDS))
+            return listOf(CrossThreadCycleB::class.java)
+        }
+    }
+
+    class CrossThreadCycleB : StartupSyncInitializer<String> {
+        override fun create(context: Context) = "b"
+
+        override fun dependencies(): List<Class<out StartupSyncInitializer<*>>> {
+            cycleDependenciesEntered.countDown()
+            check(cycleDependenciesEntered.await(5, TimeUnit.SECONDS))
+            return listOf(CrossThreadCycleA::class.java)
+        }
     }
 
     class SyncDep : StartupSyncInitializer<String> {

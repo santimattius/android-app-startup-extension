@@ -11,9 +11,9 @@ startup time without blocking the main thread.
 
 ## Features
 
-- **Synchronous Initialization:** Allows components to be initialized synchronously.
-- **Asynchronous Initialization:** Supports asynchronous component initialization to avoid blocking
-  the main thread.
+- **Synchronous Initialization:** Runs on the caller thread and returns only after the component is initialized.
+- **Asynchronous Initialization:** Runs in the configured coroutine dispatcher, keeping work off the
+  caller when that dispatcher is background-capable.
 - **Startup State Lifecycle:** Observe the startup lifecycle (`IDLE → IN_PROGRESS → COMPLETED / ERROR`) via a `StateFlow`.
 - **Timeout Support:** Await all startup jobs with a configurable timeout.
 - **Metrics Flow:** Per-initializer timing, outcome, and concurrency/dispatcher data exposed as a hot `SharedFlow` — late collectors receive a bounded replay (the most recent `metricsReplayCapacity` metrics, 256 by default).
@@ -69,7 +69,17 @@ class SyncTestInitializer : StartupSyncInitializer<Unit> {
 }
 ```
 
-> **Note:** `StartupSyncInitializer` runs on the main thread during app startup.
+> **Note:** `StartupSyncInitializer` runs on the caller thread. During provider-driven startup that is
+> naturally the main thread because Android invokes `ContentProvider.onCreate()` there; on-demand calls run
+> on their requesting thread.
+>
+> **Synchronous coordination:** Different initializer classes coordinate independently, so an unrelated
+> initializer does not wait for another component's `create()`. If an incomplete initializer A waits for
+> thread X while X synchronously requests A itself, X must wait for A's result; that is inherent to
+> synchronous exactly-once initialization.
+>
+> Upgrading from 2.x? This caller-thread contract is a 3.0 breaking change. Follow the
+> [3.0 migration guide](docs/migration-3.0.md) to audit main-thread assumptions.
 
 ### Example: `StartupAsyncInitializer`
 
@@ -85,9 +95,10 @@ class AsyncTestInitializer : StartupAsyncInitializer<Unit> {
 
 #### Per-initializer Dispatcher
 
-Override `dispatcher()` to pin the initializer's `create()` to a specific thread pool. `dispatcher()` returns
-`CoroutineDispatcher?` — an unoverridden (or `null`-returning) initializer falls back to
-`AppStartupConfig.defaultAsyncDispatcher` (itself `Dispatchers.Default` unless configured).
+`create()` runs in the resolved coroutine dispatcher. Override `dispatcher()` to select a specific dispatcher;
+`dispatcher()` returns `CoroutineDispatcher?` — an unoverridden (or `null`-returning) initializer falls back to
+`AppStartupConfig.defaultAsyncDispatcher` (itself `Dispatchers.Default` unless configured). A dispatcher may be
+`Main`, `Unconfined`, or custom, so async initialization is not guaranteed to use a different thread.
 
 ```kotlin
 class DatabaseInitializer : StartupAsyncInitializer<Unit> {
@@ -101,7 +112,7 @@ class DatabaseInitializer : StartupAsyncInitializer<Unit> {
 
 #### Cross-type Dependencies
 
-An async initializer can declare that certain sync initializers must complete before its `create()` is called by overriding `syncDependencies()`.
+An async initializer can declare that certain sync initializers must complete before its `create()` is called by overriding `syncDependencies()`. Those sync dependencies run in the current coroutine context; they are not posted to the main thread.
 
 ```kotlin
 class AnalyticsInitializer : StartupAsyncInitializer<Unit> {
@@ -416,8 +427,9 @@ for deferred work, so it cannot block on cap `1` or under `runBlocking`.
 ### StrictMode Integration
 
 Wraps each `StartupSyncInitializer.create()` invocation with a `StrictMode.ThreadPolicy` that detects
-accidental disk I/O, network access, or any other blocking operation on the main thread. Violations
-appear as `StrictMode` entries in logcat.
+accidental disk I/O, network access, or other blocking work. Provider-driven sync initialization runs on
+the main thread, so those violations are especially important to avoid. Violations appear as `StrictMode`
+entries in logcat.
 
 The original policy is always restored after each `create()` call, so this does not affect the app's
 own StrictMode configuration.

@@ -6,8 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.PackageManager.GET_META_DATA
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.os.Process
 import android.os.StrictMode
 import android.os.SystemClock
@@ -37,7 +35,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.Volatile
@@ -103,8 +100,8 @@ class AppStartupInitializer internal constructor(
      * the oldest metrics (`DROP_OLDEST`). The drop warning is only logged when debug logging is
      * enabled, so the loss is otherwise silent.
      *
-     * **Thread of emission:** metrics are emitted from the initializer's own thread —
-     * the Main Thread for sync initializers, and the initializer's `dispatcher()` for async ones.
+     * **Thread of emission:** metrics are emitted from the initializer's own execution context —
+     * the caller thread for sync initializers, and the resolved `dispatcher()` context for async ones.
      * [SharedFlow] handles the cross-thread delivery internally: your `collect` lambda always
      * runs on the dispatcher of the coroutine that launched the collection, so no manual
      * thread-switching is required on the consumer side.
@@ -134,7 +131,15 @@ class AppStartupInitializer internal constructor(
 
     private val applicationContext: Context = context.applicationContext
 
-    private val syncLock = Any()
+    private class SyncLockEntry {
+        var owner: Thread? = null
+        var depth = 0
+        var references = 0
+    }
+
+    private val syncCoordinator = java.lang.Object()
+    private val syncLockEntries = mutableMapOf<Class<out StartupSyncInitializer<*>>, SyncLockEntry>()
+    private val syncWaits = mutableMapOf<Thread, Class<out StartupSyncInitializer<*>>>()
     private val mutex = Mutex()
 
     /**
@@ -200,11 +205,9 @@ class AppStartupInitializer internal constructor(
     /**
      * Initializes a StartupSyncInitializer component if it hasn't been initialized yet.
      *
-     * This function ensures that a given `StartupSyncInitializer` component is initialized only once.
-     * It uses a synchronized block and a shared map (`initialized`) to track which components have already been
-     * initialized. If the component has already been initialized, it returns the previously initialized
-     * instance. Otherwise, it recursively calls an internal initialization function (`doInitialize<Any>(component, HashSet())`)
-     * to initialize the component and stores the result in the `initialized` map before returning it.
+     * This function coordinates each component independently. The coordinator is held only while
+     * claiming, waiting for, or releasing component ownership; `create()` and dependency work run
+     * outside it.
      *
      * @param component The Class object representing the StartupSyncInitializer component to initialize.
      *                  This must be a class that extends StartupSyncInitializer.
@@ -216,58 +219,110 @@ class AppStartupInitializer internal constructor(
      */
     fun <T> doInitialize(component: Class<out StartupSyncInitializer<*>>): T =
         tracer.section({ StartupTraceNames.of("onDemand", component.name) }) {
-            onMainThread { initializeUnderSyncLock<T>(component) }
+            initializeUnderSyncLock<T>(component, HashSet())
         }
 
-    /**
-     * Shared body of the public [doInitialize]. Startup's own sync-dependency resolution calls this
-     * directly so it is not tagged `onDemand` (that section marks only public entry points).
-     */
-    private fun <T> initializeUnderSyncLock(component: Class<out StartupSyncInitializer<*>>): T {
-        var result: Any?
+    private fun <T> initializeUnderSyncLock(
+        component: Class<out StartupSyncInitializer<*>>,
+        initializing: MutableSet<Class<*>>,
+    ): T {
         val waiting = tracer.openSection { StartupTraceNames.of("lockWait::sync", null) }
-        synchronized(syncLock) {
+        var acquired = false
+        try {
+            acquireSyncLock(component)
+            acquired = true
             tracer.closeSection(waiting)
-            result = initialized[component]
-            if (result == null) {
-                result = doInitialize<T>(component, HashSet())
-            }
+            return (initialized[component] ?: doInitialize<T>(component, initializing)) as T
+        } finally {
+            if (!acquired) tracer.closeSection(waiting)
+            if (acquired) releaseSyncLock(component)
         }
-        return result as T
     }
 
-    /**
-     * Runs synchronous initialization on Android's main thread while keeping the caller synchronous.
-     * A background caller waits for its result or failure; the main thread executes directly and is
-     * never blocked waiting on itself.
-     */
-    private fun <T> onMainThread(block: () -> T): T {
-        if (Looper.myLooper() == Looper.getMainLooper()) return block()
-
-        val completed = CountDownLatch(1)
-        var result: T? = null
-        var failure: Throwable? = null
-        val posted =
-            Handler(Looper.getMainLooper()).post {
+    private fun acquireSyncLock(component: Class<out StartupSyncInitializer<*>>) {
+        val waiter = Thread.currentThread()
+        synchronized(syncCoordinator) {
+            val entry = syncLockEntries.getOrPut(component) { SyncLockEntry() }
+            entry.references++
             try {
-                result = block()
+                while (true) {
+                    val owner = entry.owner
+                    when {
+                        owner == null -> {
+                            entry.owner = waiter
+                            entry.depth = 1
+                            return
+                        }
+
+                        owner === waiter -> {
+                            entry.depth++
+                            return
+                        }
+
+                        else -> {
+                            syncWaits[waiter] = component
+                            if (createsSyncWaitCycle(waiter, owner)) {
+                                syncWaits.remove(waiter)
+                                throw StartupExtensionException(
+                                    "Cannot initialize ${component.name}. Cross-thread cycle detected.",
+                                )
+                            }
+                            try {
+                                syncCoordinator.wait()
+                            } catch (interrupted: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                throw IllegalStateException("Interrupted while waiting for synchronous initialization.", interrupted)
+                            } finally {
+                                syncWaits.remove(waiter)
+                            }
+                        }
+                    }
+                }
             } catch (throwable: Throwable) {
-                failure = throwable
-            } finally {
-                completed.countDown()
+                releaseSyncReference(component, entry)
+                throw throwable
             }
         }
-        check(posted) { "Unable to schedule synchronous initialization on the main thread." }
+    }
 
-        try {
-            completed.await()
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw IllegalStateException("Interrupted while waiting for synchronous initialization.", interrupted)
+    private fun createsSyncWaitCycle(
+        waiter: Thread,
+        owner: Thread,
+    ): Boolean {
+        val visited = HashSet<Thread>()
+        var current: Thread? = owner
+        while (current != null && visited.add(current)) {
+            if (current === waiter) return true
+            val waitingFor = syncWaits[current] ?: return false
+            current = syncLockEntries[waitingFor]?.owner
         }
-        failure?.let { throw it }
-        @Suppress("UNCHECKED_CAST")
-        return result as T
+        return false
+    }
+
+    private fun releaseSyncLock(component: Class<out StartupSyncInitializer<*>>) {
+        val owner = Thread.currentThread()
+        synchronized(syncCoordinator) {
+            val entry = checkNotNull(syncLockEntries[component]) { "Missing sync lock entry for ${component.name}" }
+            check(entry.owner === owner) { "Thread does not own sync lock for ${component.name}" }
+            entry.depth--
+            if (entry.depth == 0) {
+                entry.owner = null
+                syncCoordinator.notifyAll()
+            }
+            releaseSyncReference(component, entry)
+        }
+    }
+
+    private fun releaseSyncReference(
+        component: Class<out StartupSyncInitializer<*>>,
+        entry: SyncLockEntry,
+    ) {
+        check(entry.references > 0) { "Missing sync lock reference for ${component.name}" }
+        entry.references--
+        if (entry.references == 0) {
+            check(entry.owner == null) { "Sync lock entry released while ${component.name} is owned" }
+            syncLockEntries.remove(component)
+        }
     }
 
     /**
@@ -387,7 +442,7 @@ class AppStartupInitializer internal constructor(
                             initializer
                                 .dependencies()
                             .filterNot { initialized.containsKey(it) }
-                            .forEach { doInitialize<Any>(it, initializing) }
+                            .forEach { initializeUnderSyncLock<Any>(it, initializing) }
                     }
 
                     StartupExtensionLogger.info { "Initializing ${component.name}" }
@@ -518,7 +573,7 @@ class AppStartupInitializer internal constructor(
                                 .syncDependencies()
                             .filterNot(initialized::containsKey)
                             .forEach { dependency ->
-                                onMainThread { initializeUnderSyncLock<Any>(dependency) }
+                                initializeUnderSyncLock<Any>(dependency, HashSet())
                             }
                     }
 
@@ -699,7 +754,7 @@ class AppStartupInitializer internal constructor(
             }
 
         val initializing = mutableSetOf<Class<*>>()
-        ordered.forEach { doInitialize(it, initializing) }
+        ordered.forEach { initializeUnderSyncLock<Any>(it, initializing) }
     }
 
     /**

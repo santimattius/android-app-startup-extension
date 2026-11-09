@@ -1,7 +1,6 @@
 package io.github.santimattius.android.startup.initializer
 
 import android.content.Context
-import androidx.annotation.MainThread
 
 /**
  * Interface for synchronously initializing components during application startup.
@@ -15,14 +14,14 @@ import androidx.annotation.MainThread
  *
  * **Key Features:**
  *
- * *   **Synchronous Initialization:**  The `create()` method is called synchronously on the main thread,
- *     ensuring that the component is fully initialized before the application proceeds. This is suitable
+ * *   **Synchronous Initialization:** The caller executes `create()` and waits for it to return,
+ *     ensuring that the component is fully initialized before execution proceeds. This is suitable
  *     for components that are critical for the app's core functionality.
  * *   **Dependency Management:** The `dependencies()` method allows you to declare other
  *     [StartupSyncInitializer]s that must be initialized before the current one. This enables
  *     complex initialization sequences.
- * *   **Main Thread Execution:** The `create()` method is annotated with `@MainThread`, indicating that it
- *     should be executed on the main application thread.
+ * *   **Caller-thread execution:** On-demand initialization runs on the calling thread. Provider-driven
+ *     startup runs on the main thread because Android invokes `ContentProvider.onCreate()` there.
  * *   **Early Execution:** By implementing this interface, the component will be initialized as early as possible during app startup.
  *
  * **Usage:**
@@ -50,27 +49,24 @@ interface StartupSyncInitializer<T : Any> {
     /**
      * Creates an instance of the desired type [T].
      *
-     * This function runs **synchronously on the main thread** inside [android.content.ContentProvider.onCreate].
-     * The Android system will trigger an ANR if the main thread is blocked for more than 5 seconds.
+     * This function runs synchronously on the thread that requests it: the caller waits until it returns.
+     * `InitializationProvider` discovery naturally invokes it on the main thread because Android calls
+     * [android.content.ContentProvider.onCreate] there; on-demand initialization and sync dependencies of
+     * async initializers run in their current caller context instead.
      *
-     * **Do NOT perform any of the following inside `create()`:**
-     * - Disk reads or writes
-     * - Network requests
-     * - Database queries
-     * - Any blocking operation or long-running computation
+     * Keep provider-driven initialization short to avoid blocking the main thread and risking an ANR.
+     * For heavy work, implement [StartupAsyncInitializer] and select an appropriate
+     * [StartupAsyncInitializer.dispatcher] (for example, `Dispatchers.IO`). A dispatcher can also be
+     * `Main`, `Unconfined`, or custom, so async execution is dispatcher-controlled rather than guaranteed
+     * to use a different thread.
      *
-     * If your component requires heavy initialization, implement [StartupAsyncInitializer] instead and
-     * move the blocking work to [StartupAsyncInitializer.dispatcher] (e.g. `Dispatchers.IO`).
-     *
-     * To detect accidental violations at development time, call
+     * To detect accidental I/O during development, call
      * `AppStartupInitializer.enableStrictModeCheck(BuildConfig.DEBUG)` from
-     * [android.app.Application.attachBaseContext]. Any blocking I/O will appear as a
-     * `StrictMode` violation in logcat.
+     * [android.app.Application.attachBaseContext]. Violations appear in logcat.
      *
      * @param context The application context.
      * @return An instance of type [T], fully initialized and ready for use.
      */
-    @MainThread
     fun create(context: Context): T
 
     /**
