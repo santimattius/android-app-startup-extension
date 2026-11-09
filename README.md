@@ -77,6 +77,9 @@ class SyncTestInitializer : StartupSyncInitializer<Unit> {
 > initializer does not wait for another component's `create()`. If an incomplete initializer A waits for
 > thread X while X synchronously requests A itself, X must wait for A's result; that is inherent to
 > synchronous exactly-once initialization.
+>
+> Upgrading from 2.x? This caller-thread contract is a 3.0 breaking change. Follow the
+> [3.0 migration guide](docs/migration-3.0.md) to audit main-thread assumptions.
 
 ### Example: `StartupAsyncInitializer`
 

@@ -9,6 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (3.0):** `StartupSyncInitializer.create()` now runs on the requesting thread instead of always being dispatched to Android's main thread. The caller remains blocked until initialization completes. Provider-driven synchronous startup still runs on main because Android invokes `InitializationProvider.onCreate()` there, while background on-demand calls and async `syncDependencies()` retain their current caller context. See [Migrating to 3.0](docs/migration-3.0.md).
+- Synchronous initializers now coordinate per component rather than through one global execution lock. Unrelated components can initialize concurrently; retained same-component requests still share one result, and cross-thread dependency cycles fail instead of hanging.
+
 ## [2.3.0] — 2026-11-03
 
 ### Added
