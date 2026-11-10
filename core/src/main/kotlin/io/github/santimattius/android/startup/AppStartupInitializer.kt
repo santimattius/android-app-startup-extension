@@ -6,8 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.PackageManager.GET_META_DATA
 import android.os.Bundle
-import android.os.Process
-import android.os.StrictMode
 import android.os.SystemClock
 import android.os.Trace
 import io.github.santimattius.android.startup.dispatcher.DispatcherInstrumentation
@@ -141,6 +139,19 @@ class AppStartupInitializer internal constructor(
 
     private val planner = StartupPlanner(registry, tracer)
 
+    private val syncRunner =
+        SyncRunner(
+            tracer = tracer,
+            registry = registry,
+            initialized = initialized,
+            syncDiscovered = syncDiscovered,
+            applicationContext = applicationContext,
+            syncLocks = syncLocks,
+            metricsBus = metricsBus,
+            planner = planner,
+            config = { config },
+        )
+
     /**
      * Initializes a component of type [T] using its corresponding [StartupSyncInitializer].
      *
@@ -206,25 +217,8 @@ class AppStartupInitializer internal constructor(
      */
     fun <T> doInitialize(component: Class<out StartupSyncInitializer<*>>): T =
         tracer.section({ StartupTraceNames.of("onDemand", component.name) }) {
-            initializeUnderSyncLock<T>(component, HashSet())
+            syncRunner.initializeUnderSyncLock<T>(component, HashSet())
         }
-
-    private fun <T> initializeUnderSyncLock(
-        component: Class<out StartupSyncInitializer<*>>,
-        initializing: MutableSet<Class<*>>,
-    ): T {
-        val waiting = tracer.openSection { StartupTraceNames.of("lockWait::sync", null) }
-        var acquired = false
-        try {
-            syncLocks.acquireSyncLock(component)
-            acquired = true
-            tracer.closeSection(waiting)
-            return (initialized[component] ?: doInitialize<T>(component, initializing)) as T
-        } finally {
-            if (!acquired) tracer.closeSection(waiting)
-            if (acquired) syncLocks.releaseSyncLock(component)
-        }
-    }
 
     /**
      * Initializes a component of type [StartupAsyncInitializer] asynchronously and ensures it's only initialized once.
@@ -288,126 +282,12 @@ class AppStartupInitializer internal constructor(
             }
             // A provider with no <meta-data> (no initializers declared) has null metaData.
             val metadata = providerInfo.metaData ?: Bundle.EMPTY
-            syncDiscoverAndInitialize(metadata)
+            syncRunner.syncDiscoverAndInitialize(metadata)
             asyncDiscoverAndInitialize(metadata)
         } catch (exception: PackageManager.NameNotFoundException) {
             throw StartupExtensionException(exception)
         } finally {
             Trace.endSection()
-        }
-    }
-
-    /**
-     * Initializes a given [StartupSyncInitializer] component and its dependencies.
-     *
-     * This function performs a depth-first initialization of [StartupSyncInitializer] components,
-     * ensuring that each component's dependencies are initialized before the component itself.
-     * It also handles cycle detection to prevent infinite loops.
-     *
-     * @param component The [Class] of the [StartupSyncInitializer] to initialize.
-     *                  It must be a concrete class with a no-argument constructor.
-     * @param initializing A mutable set used to track the components currently being initialized.
-     *                     This set is used for cycle detection.
-     * @return The result of calling the [StartupSyncInitializer.create] method on the initialized component.
-     * @throws IllegalArgumentException If a cycle is detected in the dependency graph.
-     * @throws StartupExtensionException If any exception occurs during initialization,
-     *                                  it is wrapped in a [StartupExtensionException].
-     * @throws NoSuchMethodException if the component class does not have a default constructor.
-     * @throws InstantiationException if the component class is an abstract class or an interface.
-     * @throws IllegalAccessException if the no-arg constructor of component is not accessible
-     * @throws java.lang.reflect.InvocationTargetException if the no-arg constructor throws an exception
-     * @throws ClassCastException if the instantiated class does not implement StartupSyncInitializer
-     * @param T The type returned by the initializer
-     *
-     * @suppress
-     */
-    private fun <T> doInitialize(
-        component: Class<out StartupSyncInitializer<*>>,
-        initializing: MutableSet<Class<*>>,
-    ): T {
-        val nodeOpened = tracer.openSection { StartupTraceNames.of(null, component.name) }
-        try {
-            require(component !in initializing) { "Cannot initialize ${component.name}. Cycle detected." }
-
-            var shouldRetain = true
-            val result =
-                initialized.getOrPut(component) {
-                requireConcreteClass(component)
-                initializing.add(component)
-                try {
-                    val initializer = registry.take(component) as StartupSyncInitializer<*>
-
-                    shouldRetain = initializer.retainAfterStartup()
-
-                    tracer.section({ StartupTraceNames.of("deps", component.name) }) {
-                            initializer
-                                .dependencies()
-                            .filterNot { initialized.containsKey(it) }
-                            .forEach { initializeUnderSyncLock<Any>(it, initializing) }
-                    }
-
-                    StartupExtensionLogger.info { "Initializing ${component.name}" }
-                    val startNs = System.nanoTime()
-                    val startUptimeMs = SystemClock.uptimeMillis()
-                    var success = false
-                    var failure: Throwable? = null
-                    // Install a StrictMode policy that detects accidental I/O or disk
-                    // access inside create(). Only active when the caller opts in via
-                    // enableStrictModeCheck(true). The original policy is restored after
-                    // every create() call regardless of outcome.
-                        val savedPolicy =
-                            if (config.strictModeCheckEnabled) {
-                        StrictMode.getThreadPolicy().also {
-                            StrictMode.setThreadPolicy(
-                                        StrictMode.ThreadPolicy
-                                            .Builder()
-                                    .detectAll()
-                                    .penaltyLog()
-                                            .build(),
-                            )
-                        }
-                            } else {
-                                null
-                            }
-                    try {
-                            val result =
-                                tracer.section({ StartupTraceNames.of("create", component.name) }) {
-                            initializer.create(applicationContext)
-                        }
-                        success = true
-                        StartupExtensionLogger.info { "Initialized ${component.name}" }
-                        result
-                    } catch (t: Throwable) {
-                        failure = t
-                        throw t
-                    } finally {
-                        savedPolicy?.let { StrictMode.setThreadPolicy(it) }
-                        val durationMs = (System.nanoTime() - startNs) / 1_000_000L
-                        metricsBus.publish(
-                            StartupMetric(
-                                initializerName = component.simpleName,
-                                durationMs = durationMs,
-                                isAsync = false,
-                                success = success,
-                                startTimestampMs = startUptimeMs,
-                                endTimestampMs = startUptimeMs + durationMs,
-                                processStartOffsetMs = processStartOffsetMs(startUptimeMs),
-                                initializerFqn = component.name,
-                                errorType = failure?.javaClass?.name,
-                                errorMessage = failure?.message,
-                                ),
-                        )
-                    }
-                } catch (throwable: Throwable) {
-                    throw StartupExtensionException(throwable)
-                } finally {
-                    initializing.remove(component)
-                }
-            } as T
-            if (!shouldRetain) initialized.remove(component)
-            return result
-        } finally {
-            tracer.closeSection(nodeOpened)
         }
     }
 
@@ -474,7 +354,7 @@ class AppStartupInitializer internal constructor(
                                 .syncDependencies()
                             .filterNot(initialized::containsKey)
                             .forEach { dependency ->
-                                initializeUnderSyncLock<Any>(dependency, HashSet())
+                                syncRunner.initializeUnderSyncLock<Any>(dependency, HashSet())
                             }
                     }
 
@@ -597,65 +477,6 @@ class AppStartupInitializer internal constructor(
             inFlightKey?.let { asyncInFlight.remove(it, completion) }
             tracer.closeAsyncSection(nodeSpan)
         }
-    }
-
-    /**
-     * Discovers and initializes `StartupSyncInitializer` components.
-     *
-     * This function processes metadata from a `Bundle` to identify and initialize
-     * classes that implement the `StartupSyncInitializer` interface. It filters the
-     * bundle's keys based on whether their associated string value matches
-     * `KEY_SYNC_INITIALIZER`. If a key matches, it attempts to load the
-     * corresponding class, ensuring it is a subclass of `StartupSyncInitializer`.
-     *
-     * Discovered initializers are then initialized sequentially via `doInitialize`.
-     *
-     * @param metadata A `Bundle` containing metadata about potential `StartupSyncInitializer` classes.
-     *                 Each key in the bundle represents a fully qualified class name, and the value
-     *                 associated with the key indicates whether it should be considered for initialization.
-     *                 If the value is equal to [KEY_SYNC_INITIALIZER] the class will be considered.
-     *
-     * @throws StartupExtensionException If a `ClassNotFoundException` occurs while loading a class.
-     *
-     * @see StartupSyncInitializer
-     * @see KEY_SYNC_INITIALIZER
-     * @see doInitialize
-     */
-    private fun syncDiscoverAndInitialize(metadata: Bundle) {
-        tracer.section({ StartupTraceNames.of("discover::sync", null) }) {
-            syncDiscovered.addAll(
-                metadata
-                    .keySet()
-                    .filter { key -> metadata.getString(key) == KEY_SYNC_INITIALIZER }
-                    .mapNotNull { key ->
-                        try {
-                            Class
-                                .forName(key, false, applicationContext.classLoader)
-                                .takeIf { StartupSyncInitializer::class.java.isAssignableFrom(it) }
-                                ?.let { it as Class<out StartupSyncInitializer<*>> }
-                                ?.also { StartupExtensionLogger.info { "Discovered $key" } }
-                        } catch (e: ClassNotFoundException) {
-                            throw StartupExtensionException(e)
-                        }
-                    },
-            )
-        }
-
-        val ordered =
-            when (config.syncOrderingStrategy) {
-                is SyncOrderingStrategy.Lazy -> {
-                    syncDiscovered.toList()
-                }
-
-                is SyncOrderingStrategy.Topological -> {
-                tracer.section({ StartupTraceNames.of("resolveGraph::topological", null) }) {
-                    topologicalSort(syncDiscovered)
-                }
-        }
-            }
-
-        val initializing = mutableSetOf<Class<*>>()
-        ordered.forEach { initializeUnderSyncLock<Any>(it, initializing) }
     }
 
     /** Delegates to [StartupPlanner.topologicalSort]. */
@@ -804,9 +625,6 @@ class AppStartupInitializer internal constructor(
     ): Map<Class<out StartupAsyncInitializer<*>>, StartupPriority> = planner.computeEffectivePriorities(discovered)
 
 
-    /** Milliseconds from process start to [uptimeMs] (same `uptimeMillis` clock); never negative. */
-    private fun processStartOffsetMs(uptimeMs: Long): Long = (uptimeMs - Process.getStartUptimeMillis()).coerceAtLeast(0L)
-
     /**
      * Emits a single strict-mode warning per startup when the observed async-concurrency
      * [snapshot] exceeds [AppStartupConfig.strictModeConcurrencyThreshold].
@@ -835,29 +653,8 @@ class AppStartupInitializer internal constructor(
         }
     }
 
-    /**
-     * Validates that [component] is a concrete, instantiable class before attempting reflection.
-     *
-     * Throwing early with a clear message avoids the cryptic [InstantiationException] that the
-     * JVM would otherwise produce when [Class.newInstance] is called on an abstract class or interface.
-     *
-     * @throws StartupExtensionException if [component] is abstract or an interface.
-     */
-    private fun requireConcreteClass(component: Class<*>) {
-        if (component.isInterface ||
-            java.lang.reflect.Modifier
-                .isAbstract(component.modifiers)
-        ) {
-            throw StartupExtensionException(
-                "Cannot initialize ${component.name}: expected a concrete class " +
-                    "but got an abstract class or interface.",
-            )
-        }
-    }
-
     companion object {
         private const val STARTUP_LOG_TAG = "StartupLogger"
-        private const val KEY_SYNC_INITIALIZER = "sync-initializer"
         private const val KEY_ASYNC_INITIALIZER = "async-initializer"
         private const val SECTION_NAME = "StartupExtension"
         private const val TRACE_PROVIDER_INFO = "Startup::getProviderInfo"
