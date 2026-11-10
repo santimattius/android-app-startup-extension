@@ -25,8 +25,8 @@ This library separates the two kinds of work:
 - **Async initializers** with a `suspend` `create()`, an optional per-initializer dispatcher, and no blocking
   of startup. Await them where you need them.
 
-See [App Startup Extension vs AndroidX App Startup](docs/app-startup-extension-vs-androidx.md) for a
-detailed comparison (in Spanish).
+Read [App Startup Extension vs AndroidX App Startup: Optimizing Startup with Coroutines](https://medium.com/@santimattius/app-startup-extension-vs-androidx-app-startup-optimizing-startup-with-coroutines-a38ee3fa1095) for a
+detailed comparison.
 
 ## Features
 
