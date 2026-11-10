@@ -1,6 +1,6 @@
 # Architecture: how it works internally
 
-This document describes how `android-app-startup-extension` discovers, orders and runs initializers, and
+This document describes how `app-startup-extension` discovers, orders and runs initializers, and
 which guarantees it gives about threads, concurrency and errors in 3.0. It is derived from the code in
 `core/src/main/kotlin`; types marked *internal* are implementation details and are not part of the public
 API (see the [API reference](api-reference.md) for the public surface).
@@ -13,7 +13,7 @@ API (see the [API reference](api-reference.md) for the public surface).
 4. [Dependency resolution](#4-dependency-resolution)
 5. [Threading model (3.0)](#5-threading-model-30)
 6. [Async execution](#6-async-execution)
-7. [State ownership and thread safety](#7-state-ownership-and-thread-safety)
+7. [State ownership and thread-safety notes](#7-state-ownership-and-thread-safety-notes)
 8. [Awaiting startup](#8-awaiting-startup)
 9. [Metrics and tracing](#9-metrics-and-tracing)
 10. [Error handling](#10-error-handling)
@@ -355,7 +355,7 @@ slices and counters are no-ops. Counters (`Startup::activeAsync`, `Startup::perm
 `Startup::permitsAvailable`, `Startup::busSize`) and zero-length markers (state transitions, `cancel`,
 `priorityInversion`, `strictModeConcurrency`, `deferredSignal`/`deferredTimeout`) never alter behavior and are
 skipped when tracing is disabled. The tracer interface is internal; the section names are the observable
-contract. The full list is in the README's observability section.
+contract. The full list is in [Observability](observability.md#trace-sections).
 
 **Dispatcher instrumentation.** Opt-in and debug-only. See
 [`DispatcherSnapshot`](api-reference.md#dispatchersnapshot).

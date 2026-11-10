@@ -1,6 +1,6 @@
 # API reference
 
-Reference of the public API of `io.github.santimattius:android-app-startup-extension`, verified against
+Reference of the public API of `io.github.santimattius.android:app-startup-extension`, verified against
 the committed ABI dump (`core/api/core.api`) and the sources. Everything not listed here (runners,
 planner, engine, registry, tracer, metrics bus, `InstrumentedDispatcher`, `AndroidFirstFrameSignal`,
 `StartupExtensionLogger`) is `internal` and may change without notice. For how the pieces fit together see
@@ -428,7 +428,7 @@ contract is the set of `android.os.Trace` names the library writes, of the form 
 `Startup::create::<FQN>`, `Startup::permitWait::<FQN>`, `Startup::awaitAll`, `Startup::onDemand::<FQN>`,
 `Startup::marker::COMPLETED`; counters `Startup::activeAsync`, `Startup::permitsWaiting`,
 `Startup::permitsAvailable` and `Startup::busSize` (API 29+). The outer provider slice is named
-`StartupExtension`. See the README's observability section for the complete table.
+`StartupExtension`. See [Observability](observability.md#trace-sections) for the complete table.
 
 ## 7. Priorities
 
