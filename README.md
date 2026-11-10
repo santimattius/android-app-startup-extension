@@ -63,7 +63,7 @@ Latest stable release:
 
 ```kotlin
 dependencies {
-    implementation("io.github.santimattius.android:app-startup-extension:2.3.0")
+    implementation("io.github.santimattius.android:app-startup-extension:2.2.0")
 }
 ```
 

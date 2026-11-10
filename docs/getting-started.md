@@ -3,7 +3,7 @@
 This page takes you from an empty dependency list to a working sync and async initializer, and shows how
 to confirm that startup behaves as expected.
 
-> **Pre-release notice.** The 3.0 line is in ALPHA. The latest stable release is `2.3.0`; the pre-release
+> **Pre-release notice.** The 3.0 line is in ALPHA. The latest stable release is `2.2.0`; the pre-release
 > coordinate is `3.0.0-ALPHA01`. If you are upgrading from 2.x, read the [3.0 migration guide](migration-3.0.md)
 > first.
 
@@ -38,7 +38,7 @@ Add the dependency using one of the following styles.
 
 ```kotlin
 dependencies {
-    implementation("io.github.santimattius.android:app-startup-extension:2.3.0")
+    implementation("io.github.santimattius.android:app-startup-extension:2.2.0")
 }
 ```
 
@@ -46,7 +46,7 @@ dependencies {
 
 ```groovy
 dependencies {
-    implementation "io.github.santimattius.android:app-startup-extension:2.3.0"
+    implementation "io.github.santimattius.android:app-startup-extension:2.2.0"
 }
 ```
 
@@ -54,7 +54,7 @@ dependencies {
 
 ```toml
 [versions]
-appStartupExtension = "2.3.0"
+appStartupExtension = "2.2.0"
 
 [libraries]
 app-startup-extension = { group = "io.github.santimattius.android", name = "app-startup-extension", version.ref = "appStartupExtension" }

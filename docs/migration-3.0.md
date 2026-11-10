@@ -4,7 +4,7 @@ Version 3.0 changes the execution contract of `StartupSyncInitializer`. This gui
 shows what to audit, and gives a checklist.
 
 > **Pre-release.** 3.0 is currently published as an ALPHA (`3.0.0-ALPHA01`). The latest stable release is
-> `2.3.0`.
+> `2.2.0`.
 
 ## Summary of breaking changes
 
