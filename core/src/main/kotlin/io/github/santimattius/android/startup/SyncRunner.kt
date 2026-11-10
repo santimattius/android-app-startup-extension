@@ -101,7 +101,7 @@ internal class SyncRunner(
                     var failure: Throwable? = null
                     // Install a StrictMode policy that detects accidental I/O or disk
                     // access inside create(). Only active when the caller opts in via
-                    // enableStrictModeCheck(true). The original policy is restored after
+                    // configure { strictModeCheckEnabled = true }. The original policy is restored after
                     // every create() call regardless of outcome.
                         val savedPolicy =
                             if (config().strictModeCheckEnabled) {
