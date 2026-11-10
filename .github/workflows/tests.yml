@@ -40,6 +40,9 @@ jobs:
       - name: Run unit tests
         run: ./gradlew test --stacktrace --no-daemon
 
+      - name: Run lint
+        run: ./gradlew :core:lintDebug --stacktrace --no-daemon
+
       - name: Check public API (ABI dump)
         run: ./gradlew :core:apiCheck --stacktrace --no-daemon
 

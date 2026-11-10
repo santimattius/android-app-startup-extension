@@ -298,7 +298,6 @@ class AppStartupInitializer internal constructor(
 
 
     companion object {
-        private const val STARTUP_LOG_TAG = "StartupLogger"
         private const val SECTION_NAME = "StartupExtension"
         private const val TRACE_PROVIDER_INFO = "Startup::getProviderInfo"
 

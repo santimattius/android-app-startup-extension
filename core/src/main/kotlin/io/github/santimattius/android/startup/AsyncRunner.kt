@@ -188,14 +188,14 @@ internal class AsyncRunner(
                         throw t
                     } finally {
                         val finishedNs = System.nanoTime()
-                            if (!permitAcquired) {
-                                permitWaitMs = (finishedNs - requestedNs) / 1_000_000L
-                            }
-                            if (permitAcquired) coroutinesEngine.releaseAsyncPermit()
+                        if (!permitAcquired) {
+                            permitWaitMs = (finishedNs - requestedNs) / 1_000_000L
+                        }
+                        if (permitAcquired) coroutinesEngine.releaseAsyncPermit()
                         val durationMs = (finishedNs - startedNs) / 1_000_000L
-                            // A body that never started (cancelled while waiting for a permit or queued on a
-                            // dispatcher) has no start instant, so queue delay runs up to cancellation.
-                            // This keeps queueDelayMs >= permitWaitMs.
+                        // A body that never started (cancelled while waiting for a permit or queued on a
+                        // dispatcher) has no start instant, so queue delay runs up to cancellation.
+                        // This keeps queueDelayMs >= permitWaitMs.
                         val queueDelayMs = ((if (bodyStarted) startedNs else finishedNs) - requestedNs) / 1_000_000L
                         metricsBus.publish(
                             StartupMetric(
