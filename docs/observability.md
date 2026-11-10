@@ -197,4 +197,4 @@ them while logging is off. The priority-inversion warning is the exception: it i
 - [Configuration](guides/configuration.md)
 - [Troubleshooting](guides/troubleshooting.md)
 - [Architecture: metrics and tracing](architecture.md#9-metrics-and-tracing)
-- [Coroutine storm](coroutine-storm.md) (in Spanish)
+- [Coroutine storm](coroutine-storm.md)

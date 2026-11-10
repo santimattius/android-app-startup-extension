@@ -50,7 +50,7 @@ asynchronous initializers.
 
 ## Performance
 
-These articles are written in Spanish.
+The comparison article is written in Spanish; the other two pages are in English.
 
 | Page | Description |
 |---|---|
