@@ -9,12 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [3.0.0-ALPHA01] — 2026-11-10
 
-- **Breaking (3.0):** `StartupSyncInitializer.create()` now runs on the requesting thread instead of always being dispatched to Android's main thread. The caller remains blocked until initialization completes. Provider-driven synchronous startup still runs on main because Android invokes `InitializationProvider.onCreate()` there, while background on-demand calls and async `syncDependencies()` retain their current caller context. See [Migrating to 3.0](docs/migration-3.0.md).
-- Synchronous initializers now coordinate per component rather than through one global execution lock. Unrelated components can initialize concurrently; retained same-component requests still share one result, and cross-thread dependency cycles fail instead of hanging.
-
-## [2.3.0] — 2026-11-03
+> Pre-release. Version 2.3.0 was never published; its changes are included in this release together with the 3.0 changes.
 
 ### Added
 
@@ -50,6 +47,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking (3.0):** `StartupSyncInitializer.create()` now runs on the requesting thread instead of always being dispatched to Android's main thread. The caller remains blocked until initialization completes. Provider-driven synchronous startup still runs on main because Android invokes `InitializationProvider.onCreate()` there, while background on-demand calls and async `syncDependencies()` retain their current caller context. See [Migrating to 3.0](docs/migration-3.0.md).
+- Synchronous initializers now coordinate per component rather than through one global execution lock. Unrelated components can initialize concurrently; retained same-component requests still share one result, and cross-thread dependency cycles fail instead of hanging.
 - `metricsFlow` no longer replays unbounded history: late collectors receive the most recent
   `metricsReplayCapacity` metrics in order (the full startup in practice); beyond the bound the oldest
   are dropped first, emitters never suspend, and one warning is logged (when debug logging is on).
@@ -79,17 +78,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Each initializer class is now instantiated once per startup (graph passes no longer create
   throwaway instances).
 
-### Fixed
-
-- `InitializationProvider` no longer crashes the process at launch (`NullPointerException` in
-  `AppStartupInitializer.discoverAndInitialize`) when no initializers are declared in the manifest,
-  i.e. when the provider has no `<meta-data>`. Affects 2.2.0 as well.
-
 ### Removed
 
 - The library no longer declares `androidx.appcompat:appcompat` and `com.google.android.material:material`
   (the library code never used them). They are no longer transitive dependencies of consumers;
   apps that relied on this library pulling them in must declare their own dependency.
+
+### Fixed
+
+- `InitializationProvider` no longer crashes the process at launch (`NullPointerException` in
+  `AppStartupInitializer.discoverAndInitialize`) when no initializers are declared in the manifest,
+  i.e. when the provider has no `<meta-data>`. Affects 2.2.0 as well.
 
 ## [2.2.0] — 2026-07-14
 
@@ -357,8 +356,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Published to Maven Central as
   `io.github.santimattius.android:app-startup-extension`.
 
-[Unreleased]: https://github.com/santimattius/android-app-startup-extension/compare/2.3.0...HEAD
-[2.3.0]: https://github.com/santimattius/android-app-startup-extension/compare/2.2.0...2.3.0
+[Unreleased]: https://github.com/santimattius/android-app-startup-extension/compare/3.0.0-ALPHA01...HEAD
+[3.0.0-ALPHA01]: https://github.com/santimattius/android-app-startup-extension/compare/2.2.0...3.0.0-ALPHA01
 [2.2.0]: https://github.com/santimattius/android-app-startup-extension/compare/2.1.0...2.2.0
 [2.1.0]: https://github.com/santimattius/android-app-startup-extension/compare/2.0.0...2.1.0
 [2.0.0]: https://github.com/santimattius/android-app-startup-extension/compare/1.1.0...2.0.0
