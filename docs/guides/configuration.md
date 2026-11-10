@@ -89,7 +89,7 @@ creates a `Semaphore`; a permit is acquired after the initializer's dependencies
 released when `create()` finishes. A parent therefore never holds a permit while waiting for a child, so a
 cap of `1` cannot deadlock on dependency chains. Measure first with `StartupMetric.queueDelayMs`,
 `permitWaitMs` and `concurrentActiveCount` ([Observability](../observability.md)). Background on the
-problem: [Coroutine storm](../coroutine-storm.md) (in Spanish).
+problem: [Coroutine storm](../coroutine-storm.md).
 
 ### `defaultAsyncDispatcher`
 

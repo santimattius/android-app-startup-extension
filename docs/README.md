@@ -50,10 +50,8 @@ asynchronous initializers.
 
 ## Performance
 
-These articles are written in Spanish.
-
 | Page | Description |
 |---|---|
-| [App Startup Extension vs AndroidX App Startup](app-startup-extension-vs-androidx.md) | Comparison, configuration strategies and trade-offs |
+| [App Startup Extension vs AndroidX App Startup (article)](https://medium.com/@santimattius/app-startup-extension-vs-androidx-app-startup-optimizing-startup-with-coroutines-a38ee3fa1095) | Comparison, trade-offs and how to optimize startup with coroutines |
 | [Coroutine storm](coroutine-storm.md) | Why unbounded fan-out hurts, how to detect and mitigate it |
 | [Performance analysis](performance-analysis.md) | Review of risks, memory and correctness findings in `core/` |

@@ -1,8 +1,7 @@
 # Migrating from AndroidX App Startup
 
 This page shows how to move an existing initializer from `androidx.startup` to this library. For the
-rationale and a comparison, see [App Startup Extension vs AndroidX App Startup](../app-startup-extension-vs-androidx.md)
-(written in Spanish).
+rationale and a comparison, see the article [App Startup Extension vs AndroidX App Startup](https://medium.com/@santimattius/app-startup-extension-vs-androidx-app-startup-optimizing-startup-with-coroutines-a38ee3fa1095).
 
 The two providers can coexist in one app. The sample app declares both, with the AndroidX entry under
 `androidx.startup.InitializationProvider` and its own entries under this library's provider.

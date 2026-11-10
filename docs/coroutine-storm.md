@@ -1,57 +1,57 @@
-# Coroutine Storm: cuando lanzar corrutinas de más degrada toda la app
+# Coroutine Storm: how launching too many coroutines degrades the whole app
 
-*Borrador de artículo técnico para la comunidad. Enfocado en el arranque (startup) de aplicaciones Android/JVM, pero aplicable a cualquier código basado en Kotlin Coroutines.*
+*Draft technical article for the community. Focused on Android/JVM application startup, but applicable to any code based on Kotlin Coroutines.*
 
 > **TL;DR**
-> Un *coroutine storm* es lanzar un número desproporcionado de corrutinas al mismo tiempo contra un pool de hilos **compartido y acotado** (`Dispatchers.Default`, `Dispatchers.IO`). Como esos dispatchers son **singletons de proceso**, la tormenta no queda "contenida" donde ocurre: satura el pool para **toda** la aplicación, le roba tiempo de CPU al **hilo principal**, y el usuario lo siente como **arranque lento, jank y ANR**. Sí, una tormenta lanzada en cualquier parte de la app puede degradar pantallas y flujos que no tienen nada que ver con ella.
+> A *coroutine storm* is launching a disproportionate number of coroutines at the same time against a **shared, bounded** thread pool (`Dispatchers.Default`, `Dispatchers.IO`). Because those dispatchers are **process-wide singletons**, the storm is not "contained" where it happens: it saturates the pool for the **entire** application, steals CPU time from the **main thread**, and the user feels it as **slow startup, jank and ANRs**. Yes, a storm launched anywhere in the app can degrade screens and flows that have nothing to do with it.
 
 ---
 
-## 1. Qué es un "coroutine storm"
+## 1. What a "coroutine storm" is
 
-Lanzar una corrutina es barato. Lanzar *diez mil* corrutinas que quieren correr **a la vez** no lo es.
+Launching a coroutine is cheap. Launching *ten thousand* coroutines that all want to run **at the same time** is not.
 
-Una corrutina no ejecuta en el vacío: necesita un **hilo** para correr su cuerpo. Ese hilo lo entrega un `CoroutineDispatcher`. Y los dispatchers "de fábrica" están respaldados por pools de hilos **finitos**:
+A coroutine does not run in a vacuum: it needs a **thread** to run its body. That thread is provided by a `CoroutineDispatcher`. And the stock dispatchers are backed by **finite** thread pools:
 
-| Dispatcher | Paralelismo real (por defecto) | Uso correcto |
+| Dispatcher | Actual parallelism (by default) | Correct use |
 |---|---|---|
-| `Dispatchers.Default` | `max(2, nº de cores)` | Trabajo **CPU-bound** (parsing, mapeos, cálculo) |
-| `Dispatchers.IO` | 64 hilos (o nº de cores si es mayor) | Trabajo **bloqueante**: disco, red, DB |
-| `Dispatchers.Main` | 1 (el hilo de UI) | UI, orquestación ligera |
+| `Dispatchers.Default` | `max(2, number of cores)` | **CPU-bound** work (parsing, mapping, computation) |
+| `Dispatchers.IO` | 64 threads (or the number of cores if larger) | **Blocking** work: disk, network, DB |
+| `Dispatchers.Main` | 1 (the UI thread) | UI, lightweight orchestration |
 
-Puntos clave que hacen posible la tormenta:
+Key points that make the storm possible:
 
-1. **Son pools acotados.** En un teléfono de 8 cores, `Default` corre ~8 corrutinas CPU-bound a la vez. `IO` admite hasta 64 llamadas bloqueantes simultáneas.
-2. **`Default` e `IO` comparten el mismo pool elástico** de hilos por debajo. `IO` puede crecer hasta su límite, pero no vive en un universo aparte.
-3. **Son singletons de proceso.** Hay *un* `Dispatchers.Default` y *un* `Dispatchers.IO` para **toda** la aplicación: tu código, tus librerías, tus SDKs de terceros, el decodificado de imágenes, la capa de red… todos comparten los mismos hilos.
-4. **Todo compite por los mismos cores físicos.** Aun el hilo principal (`Main`) es *un hilo del sistema operativo más* que pelea por CPU contra los 8, 16 o 64 hilos worker que la tormenta despertó.
+1. **They are bounded pools.** On an 8-core phone, `Default` runs ~8 CPU-bound coroutines at a time. `IO` accepts up to 64 simultaneous blocking calls.
+2. **`Default` and `IO` share the same elastic thread pool** underneath. `IO` can grow up to its limit, but it does not live in a separate universe.
+3. **They are process-wide singletons.** There is *one* `Dispatchers.Default` and *one* `Dispatchers.IO` for the **whole** application: your code, your libraries, your third-party SDKs, image decoding, the network layer... all of them share the same threads.
+4. **Everything competes for the same physical cores.** Even the main thread (`Main`) is just *one more operating system thread* fighting for CPU against the 8, 16 or 64 worker threads that the storm woke up.
 
-Cuando lanzás más corrutinas *listas para correr* de las que el pool puede atender, el resto no desaparece: **se encola**. Ese tiempo "listo pero esperando un hilo" es el corazón del problema.
+When you launch more *ready-to-run* coroutines than the pool can serve, the rest do not disappear: **they are queued**. That time spent "ready but waiting for a thread" is the heart of the problem.
 
-> **La señal que importa: `queueDelay`.** No es cuánto tarda tu tarea en ejecutarse, sino **cuánto espera desde que está lista para correr hasta que realmente arranca**. En un pool saturado, `queueDelay` se dispara aunque cada tarea individual sea rápida.
-
----
-
-## 2. Por qué el startup es el epicentro perfecto
-
-El arranque concentra todos los ingredientes para la tormenta:
-
-- **Todo quiere ejecutarse "ya".** App Startup / inicializadores, el grafo de DI, SDKs de analytics, crash reporting, remote config, feature flags, precarga de caches… todo se dispara en la misma ventana de tiempo.
-- **El patrón dominante es "dispará y olvidá".** Es tentador resolver cada inicialización pesada con un `scope.launch(Dispatchers.IO) { … }` por componente. Con 30–40 inicializadores, ya estás lanzando 30–40 corrutinas que compiten por el mismo pool en el segundo más caliente del proceso.
-- **El disco está frío.** En cold start las cachés del sistema de archivos están vacías: cada lectura tarda más, cada hilo de `IO` se retiene más tiempo, y por lo tanto **más corrutinas se encolan** esperando un permiso de ejecución.
-- **El main thread está en el camino crítico.** El primer frame, la primera pantalla y —en Android— el `ContentProvider`/`Application`/primera `Activity` corren en el hilo principal. Cualquier trabajo que le robe CPU en ese instante retrasa lo que el usuario **ve**.
-
-El resultado típico: **Time To Initial Display (TTID) alto, jank en la primera pantalla y, en el peor caso, ANR** — no porque una tarea sea lenta, sino porque cientos de tareas rápidas se pisan entre sí.
+> **The signal that matters: `queueDelay`.** It is not how long your task takes to execute, but **how long it waits from the moment it is ready to run until it actually starts**. In a saturated pool, `queueDelay` shoots up even though every individual task is fast.
 
 ---
 
-## 3. La mecánica del daño
+## 2. Why startup is the perfect epicenter
 
-Visualmente, una tormenta se ve así: muchas más corrutinas *listas para correr* que hilos disponibles, una cola que crece (`queueDelay`), y el hilo principal peleando por los mismos cores.
+Startup concentrates all the ingredients for a storm:
+
+- **Everything wants to run "now".** App Startup / initializers, the DI graph, analytics SDKs, crash reporting, remote config, feature flags, cache preloading... everything fires in the same time window.
+- **The dominant pattern is "fire and forget".** It is tempting to solve every heavy initialization with a `scope.launch(Dispatchers.IO) { ... }` per component. With 30-40 initializers, you are already launching 30-40 coroutines that compete for the same pool in the hottest second of the process.
+- **The disk is cold.** On a cold start the file system caches are empty: every read takes longer, every `IO` thread is held longer, and therefore **more coroutines get queued** waiting for permission to run.
+- **The main thread is on the critical path.** The first frame, the first screen and, on Android, the `ContentProvider`/`Application`/first `Activity` all run on the main thread. Any work that steals CPU from it at that moment delays what the user **sees**.
+
+The typical result: **high Time To Initial Display (TTID), jank on the first screen and, in the worst case, an ANR**, not because one task is slow, but because hundreds of fast tasks step on each other.
+
+---
+
+## 3. The mechanics of the damage
+
+Visually, a storm looks like this: many more *ready-to-run* coroutines than available threads, a growing queue (`queueDelay`), and the main thread fighting for the same cores.
 
 ```mermaid
 flowchart TB
-    subgraph storm["Coroutine storm: 200 launch { } a la vez"]
+    subgraph storm["Coroutine storm: 200 launch { } at once"]
         direction LR
         c1["coroutine 1"]
         c2["coroutine 2"]
@@ -59,9 +59,9 @@ flowchart TB
         cN["coroutine 200"]
     end
 
-    queue["Cola: ~192 corrutinas en estado RUNNABLE<br/>(listas pero SIN hilo) → queueDelay ↑"]
+    queue["Queue: ~192 coroutines in RUNNABLE state<br/>(ready but WITHOUT a thread) → queueDelay ↑"]
 
-    subgraph pool["Dispatchers.Default / IO — pool COMPARTIDO y acotado (p. ej. 8 hilos)"]
+    subgraph pool["Dispatchers.Default / IO — SHARED, bounded pool (e.g. 8 threads)"]
         direction LR
         w1["worker 1"]
         w2["worker 2"]
@@ -71,144 +71,144 @@ flowchart TB
 
     storm --> queue --> pool
 
-    crit["Trabajo del CAMINO CRÍTICO<br/>(withContext IO desde la UI)"] -. atrapado detrás .-> queue
-    main["MAIN THREAD<br/>compite por los mismos cores"] -. recibe menos CPU .-> pool
-    pool --> render["RENDER THREAD<br/>espera el display list del main"]
-    render --> ux["Usuario: jank · TTID alto · ANR"]
+    crit["CRITICAL PATH work<br/>(withContext IO from the UI)"] -. stuck behind .-> queue
+    main["MAIN THREAD<br/>competes for the same cores"] -. gets less CPU .-> pool
+    pool --> render["RENDER THREAD<br/>waits for the main thread's display list"]
+    render --> ux["User: jank · high TTID · ANR"]
 ```
 
-Una tormenta hace daño por varios frentes a la vez:
+A storm does damage on several fronts at once:
 
-### 3.1 Saturación del pool y encolado (`queueDelay`)
-Si hay 8 hilos en `Default` y lanzás 200 tareas CPU-bound, 192 esperan. La tarea #193 puede ser trivial, pero no arranca hasta que se libere un hilo. Tu trabajo del **camino crítico** queda detrás de trabajo diferible.
+### 3.1 Pool saturation and queueing (`queueDelay`)
+If there are 8 threads in `Default` and you launch 200 CPU-bound tasks, 192 wait. Task #193 may be trivial, but it does not start until a thread is freed. Your **critical path** work ends up behind deferrable work.
 
-### 3.2 Sobre-suscripción y context switching
-Si además metés trabajo **bloqueante** en `Default` (mala práctica), los pocos hilos CPU quedan tomados durmiendo en I/O. El scheduler no puede avanzar el trabajo de CPU real y el sistema pierde tiempo en cambios de contexto en lugar de progreso útil.
+### 3.2 Oversubscription and context switching
+If you also put **blocking** work in `Default` (bad practice), the few CPU threads end up taken, sleeping on I/O. The scheduler cannot advance the real CPU work and the system wastes time on context switches instead of useful progress.
 
-### 3.3 Presión de memoria y GC
-Cada corrutina retiene su marco de continuación y **todo lo que captura** (contextos, callbacks, buffers). Miles de corrutinas simultáneas = miles de objetos vivos + allocations justo en el momento de mayor presión de memoria del proceso. Más GC → más pausas → más jank.
+### 3.3 Memory pressure and GC
+Each coroutine retains its continuation frame and **everything it captures** (contexts, callbacks, buffers). Thousands of simultaneous coroutines = thousands of live objects + allocations right at the moment of highest memory pressure in the process. More GC → more pauses → more jank.
 
-### 3.4 Contención de recursos compartidos aguas abajo
-El pool no es el único cuello de botella. La tormenta lo traslada a:
-- **SQLite / Room**: un único *writer*. 50 escrituras concurrentes se serializan igual, pero ahora con 50 hilos bloqueados esperando.
-- **DataStore / SharedPreferences**, el cabezal del disco, el *connection pool* de OkHttp (`Dispatcher.maxRequests`), locks de tu propio código…
+### 3.4 Contention on downstream shared resources
+The pool is not the only bottleneck. The storm moves it to:
+- **SQLite / Room**: a single *writer*. 50 concurrent writes are serialized anyway, but now with 50 blocked threads waiting.
+- **DataStore / SharedPreferences**, the disk head, OkHttp's *connection pool* (`Dispatcher.maxRequests`), locks in your own code...
 
-La concurrencia "de mentira" (lanzar todo junto) no acelera un recurso intrínsecamente secuencial; solo agrega hilos bloqueados y latencia de encolado.
+"Fake" concurrency (launching everything together) does not speed up an intrinsically sequential resource; it only adds blocked threads and queueing latency.
 
-### 3.5 Inanición indirecta del hilo principal
-El más subestimado, y el que más se nota. Lo desarrollamos entero en la sección 5.
+### 3.5 Indirect starvation of the main thread
+The most underestimated one, and the one that is felt the most. We cover it in full in section 5.
 
 ---
 
-## 4. La pregunta clave: ¿una tormenta en otra parte degrada toda la app?
+## 4. The key question: does a storm elsewhere degrade the whole app?
 
-**Sí, y es la consecuencia más importante de entender.**
+**Yes, and it is the most important consequence to understand.**
 
-El error mental común es asumir aislamiento:
+The common mental mistake is assuming isolation:
 
-> *"Lo lanzo en un dispatcher de background, así que no afecta al resto."*
+> *"I launch it on a background dispatcher, so it does not affect the rest."*
 
-Es **falso**. `Dispatchers.Default` y `Dispatchers.IO` son **recursos globales del proceso**. Una tormenta en la feature X no compite solo consigo misma: compite con **todo lo demás que use esos mismos dispatchers**, incluida la UI.
+That is **false**. `Dispatchers.Default` and `Dispatchers.IO` are **process-global resources**. A storm in feature X does not compete only with itself: it competes with **everything else that uses those same dispatchers**, including the UI.
 
-### Ejemplo 1 — Sync en background que arruina el scroll
-El usuario scrollea una lista con imágenes. La librería de imágenes decodifica en `Dispatchers.Default`. En ese momento, una sincronización en background dispara:
+### Example 1 — Background sync that ruins scrolling
+The user scrolls a list with images. The image library decodes on `Dispatchers.Default`. At that moment, a background sync fires:
 
 ```kotlin
-// En algún ViewModel / worker, lejos de la UI
+// In some ViewModel / worker, far from the UI
 items.forEach { item ->
-    scope.launch(Dispatchers.IO) {   // 500 corrutinas de golpe
+    scope.launch(Dispatchers.IO) {   // 500 coroutines at once
         repository.sync(item)
     }
 }
 ```
 
-`IO` se llena (tope 64), y como comparte pool elástico con `Default`, la decodificación de imágenes empieza a encolarse. Resultado: **frames perdidos en una pantalla que no tiene ninguna relación con la sincronización.**
+`IO` fills up (cap of 64), and since it shares an elastic pool with `Default`, image decoding starts to queue. Result: **dropped frames on a screen that has no relation to the sync.**
 
-### Ejemplo 2 — Fan-out durante el startup
-40 inicializadores async lanzados a la vez saturan el pool. La primera pantalla necesita leer un flag (`withContext(IO)`) para decidir qué mostrar: ese read queda detrás de los 40 y el **TTID** sube aunque el read en sí tome 2 ms.
+### Example 2 — Fan-out during startup
+40 async initializers launched at once saturate the pool. The first screen needs to read a flag (`withContext(IO)`) to decide what to show: that read ends up behind the 40 and **TTID** goes up even though the read itself takes 2 ms.
 
-**Conclusión:** el radio de impacto de una tormenta **no es el módulo donde ocurre**; es **todo el proceso**.
+**Conclusion:** the blast radius of a storm is **not the module where it happens**; it is **the whole process**.
 
 ---
 
-## 5. Dónde lo siente el usuario: Main Thread, Compose y Render Thread
+## 5. Where the user feels it: Main Thread, Compose and Render Thread
 
-Acá está el corazón de por qué esto importa: la tormenta corre en hilos de *background*, pero **el daño emerge en el pipeline de renderizado**, que es lo único que el usuario percibe.
+This is the core of why it matters: the storm runs on *background* threads, but **the damage emerges in the rendering pipeline**, which is the only thing the user perceives.
 
-### 5.1 El presupuesto de frame (la regla de oro)
-Para que la UI se sienta fluida, cada frame debe producirse dentro de su presupuesto:
+### 5.1 The frame budget (the golden rule)
+For the UI to feel fluid, every frame must be produced within its budget:
 
-| Refresco de pantalla | Presupuesto por frame |
+| Display refresh rate | Budget per frame |
 |---|---|
-| 60 Hz | ~16,6 ms |
-| 90 Hz | ~11,1 ms |
-| 120 Hz | ~8,3 ms |
+| 60 Hz | ~16.6 ms |
+| 90 Hz | ~11.1 ms |
+| 120 Hz | ~8.3 ms |
 
-Si el trabajo de un frame no termina a tiempo, ese frame **se pierde** (*dropped/janky frame*) y el usuario ve un tirón. Perder muchos frames seguidos = scroll trabado. Si el hilo principal no responde a un input en ~5 s = **ANR**.
+If a frame's work does not finish in time, that frame is **dropped** (*dropped/janky frame*) and the user sees a stutter. Dropping many frames in a row = choppy scrolling. If the main thread does not respond to an input within ~5 s = **ANR**.
 
-### 5.2 El pipeline de un frame (simplificado)
+### 5.2 The pipeline of a frame (simplified)
 ```
-Input / animación
+Input / animation
       │
       ▼
 [ MAIN THREAD (UI thread) ]
-   • recomposición (Compose) / measure + layout + draw (record)
-   • ejecuta también tus coroutines de UI (Dispatchers.Main)
-      │  produce el display list
+   • recomposition (Compose) / measure + layout + draw (record)
+   • also runs your UI coroutines (Dispatchers.Main)
+      │  produces the display list
       ▼
 [ RENDER THREAD ]
-   • rasteriza en la GPU a partir del display list
+   • rasterizes on the GPU from the display list
       │
       ▼
-   Frame en pantalla
+   Frame on screen
 ```
 
-Dos ideas centrales:
-1. **El RenderThread depende del Main Thread.** El RenderThread solo puede dibujar lo que el hilo principal ya *grabó* (el display list). Si el main thread llega tarde con ese trabajo, el RenderThread no tiene nada que rasterizar a tiempo → frame perdido, por más que la GPU esté libre.
-2. **El Main Thread no está aislado del pool.** Es un hilo del SO que compite por los mismos cores que los hilos worker. Una tormenta CPU-bound en `Default` **le roba ciclos al hilo principal a nivel de scheduler del SO**, aunque tu código nunca "bloquee" el main thread de forma explícita.
+Two central ideas:
+1. **The RenderThread depends on the Main Thread.** The RenderThread can only draw what the main thread has already *recorded* (the display list). If the main thread is late with that work, the RenderThread has nothing to rasterize in time → dropped frame, even if the GPU is free.
+2. **The Main Thread is not isolated from the pool.** It is an OS thread that competes for the same cores as the worker threads. A CPU-bound storm in `Default` **steals cycles from the main thread at the OS scheduler level**, even though your code never explicitly "blocks" the main thread.
 
-### 5.3 Cómo la tormenta ataca cada pieza
+### 5.3 How the storm attacks each piece
 
-**Main Thread — dos vías de daño:**
-- **Robo de CPU (indirecto):** la tormenta despierta N hilos worker que pelean por los cores. El hilo principal recibe menos tiempo de CPU, la recomposición/layout tarda más, y se pierde el deadline del frame.
-- **Suspensión esperando background:** el flujo de UI casi siempre hace `withContext(IO/Default) { … }` y **espera** (leer una preferencia, un archivo, un mapeo). Si ese `withContext` no consigue hilo porque el pool está saturado, la corrutina de UI queda suspendida → la pantalla no avanza.
+**Main Thread — two paths of damage:**
+- **CPU theft (indirect):** the storm wakes N worker threads that fight for the cores. The main thread gets less CPU time, recomposition/layout takes longer, and the frame deadline is missed.
+- **Suspension waiting on background:** UI flows almost always do `withContext(IO/Default) { ... }` and **wait** (reading a preference, a file, a mapping). If that `withContext` cannot get a thread because the pool is saturated, the UI coroutine stays suspended → the screen does not move forward.
 
-**Jetpack Compose — un detalle crítico:**
-`LaunchedEffect`, `rememberCoroutineScope()` y `produceState` heredan el `CoroutineContext` de la composición, que en Android está atado a **`AndroidUiDispatcher.Main`** (sincronizado con el frame clock / `Choreographer`). Es decir: **por defecto corren en el hilo principal.**
+**Jetpack Compose — a critical detail:**
+`LaunchedEffect`, `rememberCoroutineScope()` and `produceState` inherit the composition's `CoroutineContext`, which on Android is tied to **`AndroidUiDispatcher.Main`** (synchronized with the frame clock / `Choreographer`). That is: **by default they run on the main thread.**
 
-- Si lanzás trabajo pesado dentro de un `LaunchedEffect` sin cambiar de dispatcher, ese trabajo corre **en el main thread** y compite frame a frame.
-- La **recomposición** también ocurre en el main thread. Trabajo pesado dentro del cuerpo `@Composable` (o en un `remember` mal usado) se ejecuta en cada recomposición y se come el presupuesto de frame.
-- Actualizaciones frecuentes de `State` desde una tormenta (p. ej. muchos flows emitiendo a la vez) disparan **avalanchas de recomposición**, que también son trabajo del hilo principal.
+- If you launch heavy work inside a `LaunchedEffect` without switching dispatcher, that work runs **on the main thread** and competes frame by frame.
+- **Recomposition** also happens on the main thread. Heavy work inside the `@Composable` body (or in a misused `remember`) runs on every recomposition and eats the frame budget.
+- Frequent `State` updates coming from a storm (e.g. many flows emitting at once) trigger **recomposition avalanches**, which are also main thread work.
 
 **Render Thread:**
-No lo saturás con corrutinas directamente, pero lo dejás "esperando" cuando el main thread llega tarde con el display list. Además compite por CPU/GPU con todo lo demás. Un main thread hambriento se traduce en un RenderThread ocioso que no puede cumplir el deadline.
+You do not saturate it with coroutines directly, but you leave it "waiting" when the main thread is late with the display list. It also competes for CPU/GPU with everything else. A starved main thread translates into an idle RenderThread that cannot meet the deadline.
 
-### 5.4 Qué ve el usuario
-- **Cold start más largo:** pantalla en blanco / splash congelado (TTID alto), primer contenido útil tardío (TTFD alto).
-- **Jank:** scroll a tirones, animaciones que "saltan", transiciones no fluidas.
-- **Input laggy:** taps que responden tarde.
-- **ANR:** el diálogo "La app no responde" si el main thread queda sin CPU o bloqueado demasiado tiempo.
-- **Batería y calor:** decenas de hilos girando en el peor momento.
+### 5.4 What the user sees
+- **Longer cold start:** blank screen / frozen splash (high TTID), late first useful content (high TTFD).
+- **Jank:** choppy scrolling, animations that "jump", non-fluid transitions.
+- **Laggy input:** taps that respond late.
+- **ANR:** the "App isn't responding" dialog if the main thread is starved of CPU or blocked for too long.
+- **Battery and heat:** dozens of threads spinning at the worst moment.
 
 ---
 
-## 6. Cómo detectarlo: herramientas
+## 6. How to detect it: tools
 
-No optimices a ciegas: **observá primero, acotá después.**
+Do not optimize blindly: **observe first, then bound.**
 
-### 6.1 En el timeline (lo más revelador)
-- **Perfetto / System Tracing:** la herramienta más potente. Mirá los estados de los hilos: un hilo en **`Runnable`** (listo pero sin CPU) mucho tiempo es *la firma de la tormenta* a nivel de SO (el equivalente del `queueDelay`). Etiquetá tus secciones con un prefijo estable (p. ej. `Startup::MiInit`) para verlas en el timeline.
-- **Android Studio Profiler (CPU / Threads):** muestra la línea de tiempo de hilos; se ve el enjambre de `DefaultDispatcher-worker-*` peleando por slots mientras el `main` se estira.
+### 6.1 On the timeline (the most revealing)
+- **Perfetto / System Tracing:** the most powerful tool. Look at thread states: a thread in **`Runnable`** (ready but without CPU) for a long time is *the signature of the storm* at the OS level (the equivalent of `queueDelay`). Label your sections with a stable prefix (e.g. `Startup::MyInit`) to see them on the timeline.
+- **Android Studio Profiler (CPU / Threads):** shows the thread timeline; you can see the swarm of `DefaultDispatcher-worker-*` fighting for slots while `main` stretches.
 
-### 6.2 Métricas de arranque y de frames
-- **Jetpack Macrobenchmark:** `StartupTimingMetric` (TTID/TTFD) y `FrameTimingMetric` (frames lentos) de forma reproducible en CI.
-- **JankStats** (`androidx.metrics:metrics-performance`): reporta frames con jank *en producción* y permite adjuntar "estado" (qué pantalla/acción) al frame problemático.
-- **`adb shell dumpsys gfxinfo <package>`:** porcentaje de janky frames e histograma de tiempos (percentiles 50/90/95/99).
-- **Play Console — Android Vitals** y **Firebase Performance:** datos de campo: tasa de ANR, cold start lento, *frozen frames*.
+### 6.2 Startup and frame metrics
+- **Jetpack Macrobenchmark:** `StartupTimingMetric` (TTID/TTFD) and `FrameTimingMetric` (slow frames) in a reproducible way on CI.
+- **JankStats** (`androidx.metrics:metrics-performance`): reports janky frames *in production* and lets you attach "state" (which screen/action) to the problematic frame.
+- **`adb shell dumpsys gfxinfo <package>`:** percentage of janky frames and a histogram of timings (50th/90th/95th/99th percentiles).
+- **Play Console — Android Vitals** and **Firebase Performance:** field data: ANR rate, slow cold start, *frozen frames*.
 
-### 6.3 Cazando trabajo indebido en el main thread
-- **Logcat / Choreographer:** el clásico `Skipped NN frames! The application may be doing too much work on its main thread.`
-- **StrictMode** (en debug): detecta I/O de disco/red en el hilo principal.
+### 6.3 Hunting improper work on the main thread
+- **Logcat / Choreographer:** the classic `Skipped NN frames! The application may be doing too much work on its main thread.`
+- **StrictMode** (in debug): detects disk/network I/O on the main thread.
 
 ```kotlin
 if (BuildConfig.DEBUG) {
@@ -221,36 +221,36 @@ if (BuildConfig.DEBUG) {
 }
 ```
 
-### 6.4 Herramientas específicas de coroutines
-- **Nombres de hilo / dispatcher reales:** registrá en qué hilo corrió cada tarea (`Thread.currentThread().name`). Si todo cayó en los mismos worker, hay contención.
-- **`kotlinx-coroutines-debug`:** `DebugProbes.install()` + `DebugProbes.dumpCoroutines()` para ver cuántas corrutinas hay vivas y dónde están suspendidas. Corré la JVM con `-ea -Dkotlinx.coroutines.debug`.
-- **Panel de Coroutines del debugger de Android Studio:** inspección de corrutinas activas y su estado.
+### 6.4 Coroutine-specific tools
+- **Real thread / dispatcher names:** record which thread each task ran on (`Thread.currentThread().name`). If everything landed on the same workers, there is contention.
+- **`kotlinx-coroutines-debug`:** `DebugProbes.install()` + `DebugProbes.dumpCoroutines()` to see how many coroutines are alive and where they are suspended. Run the JVM with `-ea -Dkotlinx.coroutines.debug`.
+- **Coroutines panel in the Android Studio debugger:** inspection of active coroutines and their state.
 
-### 6.5 Específico de Compose
-- **Layout Inspector → recomposition counts:** detecta recomposiciones excesivas (síntoma de tormenta de estado o de trabajo pesado en composición).
-- **Reportes del compilador de Compose** (stability/skippability): ayudan a reducir recomposiciones innecesarias.
+### 6.5 Compose-specific
+- **Layout Inspector → recomposition counts:** detects excessive recompositions (a symptom of a state storm or of heavy work during composition).
+- **Compose compiler reports** (stability/skippability): help reduce unnecessary recompositions.
 
-### 6.6 Instrumentación propia
-Medí y exponé **`queueDelay`** y **concurrencia pico** para tus tareas. En esta librería, `StartupMetric` ya expone `queueDelayMs`, `concurrentActiveCount`, `dispatcherName` y `threadName` justamente para *ver* la tormenta antes de decidir si hace falta acotarla.
+### 6.6 Your own instrumentation
+Measure and expose **`queueDelay`** and **peak concurrency** for your tasks. In this library, `StartupMetric` already exposes `queueDelayMs`, `concurrentActiveCount`, `dispatcherName` and `threadName` precisely so you can *see* the storm before deciding whether it needs to be bounded.
 
 ---
 
-## 7. Galería de malas y buenas prácticas
+## 7. Gallery of bad and good practices
 
-### 7.1 Fan-out sin límite
+### 7.1 Unbounded fan-out
 
-**❌ Malo** — una corrutina por ítem, todas a la vez, en `GlobalScope`:
+**❌ Bad** — one coroutine per item, all at once, in `GlobalScope`:
 ```kotlin
 fun preloadEverything(items: List<Item>) {
     items.forEach { item ->
-        GlobalScope.launch(Dispatchers.IO) {   // sin ciclo de vida ni cupo
+        GlobalScope.launch(Dispatchers.IO) {   // no lifecycle, no quota
             cache.put(item.id, readFromDisk(item))
         }
     }
 }
 ```
 
-**✅ Bueno** — concurrencia estructurada + cupo explícito:
+**✅ Good** — structured concurrency + explicit quota:
 ```kotlin
 suspend fun preloadEverything(items: List<Item>) = coroutineScope {
     val gate = Semaphore(permits = 4)
@@ -261,35 +261,35 @@ suspend fun preloadEverything(items: List<Item>) = coroutineScope {
     }
 }
 ```
-*Por qué:* el `Semaphore` acota el pico que satura el pool global; el `coroutineScope` da cancelación y ciclo de vida.
+*Why:* the `Semaphore` bounds the peak that saturates the global pool; the `coroutineScope` provides cancellation and lifecycle.
 
-### 7.2 Dispatcher equivocado
+### 7.2 Wrong dispatcher
 
-**❌ Malo** — I/O bloqueante robando hilos de CPU:
+**❌ Bad** — blocking I/O stealing CPU threads:
 ```kotlin
-withContext(Dispatchers.Default) { file.readBytes() }   // bloqueante en Default
+withContext(Dispatchers.Default) { file.readBytes() }   // blocking on Default
 ```
 
-**✅ Bueno** — cada trabajo en su pool:
+**✅ Good** — each job in its own pool:
 ```kotlin
-withContext(Dispatchers.IO) { file.readBytes() }        // I/O en IO
-withContext(Dispatchers.Default) { parseAndMap(bytes) } // CPU en Default
+withContext(Dispatchers.IO) { file.readBytes() }        // I/O on IO
+withContext(Dispatchers.Default) { parseAndMap(bytes) } // CPU on Default
 ```
 
-### 7.3 `LaunchedEffect` con trabajo pesado (corre en Main)
+### 7.3 `LaunchedEffect` with heavy work (runs on Main)
 
-**❌ Malo** — el trabajo corre en el hilo principal y clava el frame:
+**❌ Bad** — the work runs on the main thread and pins the frame:
 ```kotlin
 @Composable
 fun Screen(id: String) {
     var data by remember { mutableStateOf<Data?>(null) }
     LaunchedEffect(id) {
-        data = repository.loadHeavy(id)   // ⚠️ por defecto: Dispatchers.Main
+        data = repository.loadHeavy(id)   // ⚠️ by default: Dispatchers.Main
     }
 }
 ```
 
-**✅ Bueno** — el trabajo pesado se mueve fuera del main:
+**✅ Good** — the heavy work is moved off the main thread:
 ```kotlin
 @Composable
 fun Screen(id: String) {
@@ -299,20 +299,20 @@ fun Screen(id: String) {
     }
 }
 ```
-*Mejor aún:* que el trabajo viva en el `ViewModel` y la UI observe estado; el `Composable` solo recolecta.
+*Even better:* let the work live in the `ViewModel` and have the UI observe state; the `Composable` only collects.
 
-### 7.4 Cálculo pesado en recomposición
+### 7.4 Heavy computation during recomposition
 
-**❌ Malo** — se recalcula en cada recomposición, en el main thread:
+**❌ Bad** — recomputed on every recomposition, on the main thread:
 ```kotlin
 @Composable
 fun Total(items: List<Item>) {
-    val total = items.sumOf { it.expensiveScore() } // corre en cada recompose
+    val total = items.sumOf { it.expensiveScore() } // runs on every recompose
     Text("$total")
 }
 ```
 
-**✅ Bueno** — cacheado y desacoplado del ritmo de recomposición:
+**✅ Good** — cached and decoupled from the recomposition rate:
 ```kotlin
 @Composable
 fun Total(items: List<Item>) {
@@ -323,18 +323,18 @@ fun Total(items: List<Item>) {
 }
 ```
 
-### 7.5 Colección de flows sin ciclo de vida
+### 7.5 Flow collection without lifecycle awareness
 
-**❌ Malo** — sigue recolectando (y recomponiendo) en background, desperdiciando recursos:
+**❌ Bad** — keeps collecting (and recomposing) in the background, wasting resources:
 ```kotlin
 val state by viewModel.state.collectAsState()
 ```
 
-**✅ Bueno** — respeta el ciclo de vida:
+**✅ Good** — respects the lifecycle:
 ```kotlin
 val state by viewModel.state.collectAsStateWithLifecycle()
 ```
-Y en Vistas clásicas:
+And in classic Views:
 ```kotlin
 lifecycleScope.launch {
     repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -343,77 +343,77 @@ lifecycleScope.launch {
 }
 ```
 
-### 7.6 `runBlocking` en el arranque / main thread
+### 7.6 `runBlocking` at startup / on the main thread
 
-**❌ Malo** — bloquea el hilo principal (ANR asegurado si hay I/O):
+**❌ Bad** — blocks the main thread (ANR guaranteed if there is I/O):
 ```kotlin
 override fun onCreate() {
-    val config = runBlocking { remoteConfig.fetch() } // ⛔ en Main
+    val config = runBlocking { remoteConfig.fetch() } // ⛔ on Main
 }
 ```
 
-**✅ Bueno** — inicialización async con punto de sincronización explícito:
+**✅ Good** — async initialization with an explicit synchronization point:
 ```kotlin
-// Lanzá la carga async; que la UI espere solo lo que necesita, cuando lo necesita.
+// Launch the async load; let the UI wait only for what it needs, when it needs it.
 appScope.launch { remoteConfig.warmUp() }
-// …y en la pantalla que la requiere:
+// ...and in the screen that requires it:
 val config = remoteConfig.awaitReady()
 ```
 
-### 7.7 Todo *eager* en el startup
+### 7.7 Everything *eager* at startup
 
-**❌ Malo** — inicializar 30 SDKs de forma bloqueante/eager antes del primer frame.
+**❌ Bad** — initializing 30 SDKs in a blocking/eager way before the first frame.
 
-**✅ Bueno** — dividí por criticidad:
-- **Camino crítico:** lo mínimo imprescindible.
-- **Diferible:** `lazy`, o disparado tras el primer frame / on-demand por la pantalla que lo use.
+**✅ Good** — split by criticality:
+- **Critical path:** the bare minimum.
+- **Deferrable:** `lazy`, or triggered after the first frame / on demand by the screen that uses it.
 
-### 7.8 Backpressure en lugar de fan-out ciego
+### 7.8 Backpressure instead of blind fan-out
 
-**❌ Malo:**
+**❌ Bad:**
 ```kotlin
-items.forEach { scope.launch { process(it) } } // N corrutinas de golpe
+items.forEach { scope.launch { process(it) } } // N coroutines at once
 ```
 
-**✅ Bueno** — caudal acotado y constante:
+**✅ Good** — bounded, steady throughput:
 ```kotlin
 items.asFlow()
     .flatMapMerge(concurrency = 4) { item -> flow { emit(process(item)) } }
     .collect()
 ```
 
-### 7.9 Acotar el pool para un subsistema
+### 7.9 Bounding the pool for a subsystem
 
-Cuando una feature *tiene* que hacer mucho trabajo concurrente, aislála del resto con una **vista acotada** del pool (no crea hilos nuevos, solo limita cuántos usa a la vez):
+When a feature *has to* do a lot of concurrent work, isolate it from the rest with a **bounded view** of the pool (it does not create new threads, it only limits how many it uses at a time):
 ```kotlin
 private val syncDispatcher = Dispatchers.IO.limitedParallelism(4)
 ```
 
-> **Ojo con los deadlocks al acotar:** si una tarea padre adquiere un permiso/slot y luego espera a un hijo que también lo necesita, con un cupo bajo (p. ej. 1) tenés deadlock. Regla: **resolvé dependencias ANTES de adquirir el permiso**; nunca retengas un permiso mientras esperás a otra tarea que también lo pide.
+> **Watch out for deadlocks when bounding:** if a parent task acquires a permit/slot and then waits for a child that also needs it, with a low quota (e.g. 1) you get a deadlock. Rule: **resolve dependencies BEFORE acquiring the permit**; never hold a permit while waiting for another task that also requests one.
 
 ---
 
-## 8. Checklist rápida
+## 8. Quick checklist
 
-- [ ] ¿Lanzo N corrutinas donde N depende de datos (ítems, features, SDKs)? → acotá con `Semaphore`, `limitedParallelism` o `flatMapMerge(concurrency)`.
-- [ ] ¿Trabajo bloqueante en `Default` o `Main`? → movelo a `IO`.
-- [ ] ¿`LaunchedEffect` / `rememberCoroutineScope` con trabajo pesado? → `withContext` a un dispatcher de background (o movelo al ViewModel).
-- [ ] ¿Cálculo caro en el cuerpo `@Composable`? → `remember` / `derivedStateOf`.
-- [ ] ¿Recolecto flows con conciencia de ciclo de vida? → `collectAsStateWithLifecycle` / `repeatOnLifecycle`.
-- [ ] ¿`runBlocking` en el arranque o en Main? → eliminalo; usá puntos de sincronización async.
-- [ ] ¿Todo esto **necesita** correr antes del primer frame? → diferí lo que no.
-- [ ] ¿Mido `queueDelay`, concurrencia pico, janky frames y TTID/TTFD, o adivino? → instrumentá primero (Perfetto, Macrobenchmark, JankStats, gfxinfo).
-- [ ] ¿Adquiero permisos/locks **después** de resolver dependencias? → evitá deadlocks con cupos bajos.
-- [ ] ¿Respeto la cancelación en bucles largos? → `ensureActive()` / `yield()`; nunca te tragues `CancellationException`.
-
----
-
-## 9. Cierre
-
-La lección central: **los dispatchers estándar son recursos globales y acotados, y el hilo principal compite con ellos por CPU.** Las corrutinas son baratas de crear, pero el *paralelismo real* no lo es. Un pico de corrutinas —en el startup o en cualquier otra parte— no queda aislado: satura el pool compartido, le roba ciclos al Main Thread, retrasa la recomposición de Compose y el trabajo del Render Thread, y **degrada pantallas y flujos que no tienen ninguna relación** con el código que lanzó la tormenta.
-
-La receta es sencilla de enunciar y disciplinada de aplicar: **observá el `queueDelay` y los frames, respetá la concurrencia estructurada, elegí el dispatcher correcto, mantené el trabajo pesado fuera del main/Compose y acotá la concurrencia** para que ninguna parte de la app pueda monopolizar los hilos —ni la CPU— de todas las demás.
+- [ ] Do I launch N coroutines where N depends on data (items, features, SDKs)? → bound with `Semaphore`, `limitedParallelism` or `flatMapMerge(concurrency)`.
+- [ ] Blocking work on `Default` or `Main`? → move it to `IO`.
+- [ ] `LaunchedEffect` / `rememberCoroutineScope` with heavy work? → `withContext` to a background dispatcher (or move it to the ViewModel).
+- [ ] Expensive computation in the `@Composable` body? → `remember` / `derivedStateOf`.
+- [ ] Do I collect flows in a lifecycle-aware way? → `collectAsStateWithLifecycle` / `repeatOnLifecycle`.
+- [ ] `runBlocking` at startup or on Main? → remove it; use async synchronization points.
+- [ ] Does all of this **need** to run before the first frame? → defer what does not.
+- [ ] Do I measure `queueDelay`, peak concurrency, janky frames and TTID/TTFD, or am I guessing? → instrument first (Perfetto, Macrobenchmark, JankStats, gfxinfo).
+- [ ] Do I acquire permits/locks **after** resolving dependencies? → avoid deadlocks with low quotas.
+- [ ] Do I respect cancellation in long loops? → `ensureActive()` / `yield()`; never swallow `CancellationException`.
 
 ---
 
-*Borrador. Los ejemplos de `queueDelayMs` / `concurrentActiveCount` / `dispatcherName` provienen de la instrumentación de [android-app-startup-extension](https://github.com/santimattius/android-app-startup-extension), pero el fenómeno y las mitigaciones aplican a cualquier código Kotlin basado en Coroutines.*
+## 9. Closing
+
+The central lesson: **the standard dispatchers are global, bounded resources, and the main thread competes with them for CPU.** Coroutines are cheap to create, but *real parallelism* is not. A spike of coroutines, at startup or anywhere else, is not isolated: it saturates the shared pool, steals cycles from the Main Thread, delays Compose recomposition and the Render Thread's work, and **degrades screens and flows that have no relation** to the code that launched the storm.
+
+The recipe is simple to state and disciplined to apply: **watch `queueDelay` and frames, respect structured concurrency, choose the right dispatcher, keep heavy work out of main/Compose and bound concurrency** so that no part of the app can monopolize the threads, or the CPU, of all the others.
+
+---
+
+*Draft. The `queueDelayMs` / `concurrentActiveCount` / `dispatcherName` examples come from the instrumentation of [android-app-startup-extension](https://github.com/santimattius/android-app-startup-extension), but the phenomenon and the mitigations apply to any Kotlin code based on Coroutines.*
