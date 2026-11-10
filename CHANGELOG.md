@@ -9,7 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Version 2.3.0 was never published; its changes ship in the next release (planned `3.0.0-ALPHA01`) together with the 3.0 changes below.
+## [3.0.0-ALPHA01] — 2026-11-10
+
+> Pre-release. Version 2.3.0 was never published; its changes are included in this release together with the 3.0 changes.
 
 ### Added
 
@@ -354,7 +356,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Published to Maven Central as
   `io.github.santimattius.android:app-startup-extension`.
 
-[Unreleased]: https://github.com/santimattius/android-app-startup-extension/compare/2.2.0...HEAD
+[Unreleased]: https://github.com/santimattius/android-app-startup-extension/compare/3.0.0-ALPHA01...HEAD
+[3.0.0-ALPHA01]: https://github.com/santimattius/android-app-startup-extension/compare/2.2.0...3.0.0-ALPHA01
 [2.2.0]: https://github.com/santimattius/android-app-startup-extension/compare/2.1.0...2.2.0
 [2.1.0]: https://github.com/santimattius/android-app-startup-extension/compare/2.0.0...2.1.0
 [2.0.0]: https://github.com/santimattius/android-app-startup-extension/compare/1.1.0...2.0.0
