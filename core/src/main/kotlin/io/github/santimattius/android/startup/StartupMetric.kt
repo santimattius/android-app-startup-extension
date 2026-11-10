@@ -13,7 +13,8 @@ package io.github.santimattius.android.startup
  *   than a real failure. When `true`, [success] will be `false` — but the two cases are semantically
  *   distinct: a cancellation is not an error and must not be reported as one to alerting systems.
  * @property dispatcherName Name of the [kotlinx.coroutines.CoroutineDispatcher] the block actually ran
- *   on. Empty for sync initializers (main-thread only, no dispatcher involved).
+ *   on. Empty for sync initializers: they run on the thread that requested initialization (the main
+ *   thread for provider-driven startup) and no dispatcher is involved.
  * @property threadName Name of the thread the block actually ran on. Empty for sync initializers.
  * @property concurrentActiveCount Snapshot of how many async initializers were actively executing
  *   `create()` at the moment this one was launched. Always `0` for sync initializers.

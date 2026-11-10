@@ -23,8 +23,11 @@ sealed class SyncOrderingStrategy {
 /**
  * Controls how async initializers are validated and launched.
  *
- * - [Concurrent] (default): every discovered async initializer gets its own coroutine.
- *   Cycle detection happens lazily inside each coroutine's DFS chain.
+ * - [Concurrent] (default): every discovered async initializer gets its own coroutine. The async
+ *   dependency graph, including transitive dependencies that are not declared in the manifest, is
+ *   validated up front (Kahn's algorithm) before any coroutine is launched, so cycles are reported
+ *   with the names of all participating nodes. A per-chain check inside each coroutine remains as a
+ *   runtime safeguard.
  *
  * - [Validated]: builds the full async-to-async dependency graph (via [StartupAsyncInitializer.dependencies])
  *   before launching any coroutine. Cycles are detected and reported upfront with all participating
@@ -34,7 +37,7 @@ sealed class SyncOrderingStrategy {
  *
  * > [StartupAsyncInitializer.syncDependencies] are intentionally excluded from this graph: by the
  *   time async initializers start, all sync initializers discovered in the manifest have already
- *   completed on the main thread.
+ *   completed (on the thread that ran provider-driven startup, i.e. the main thread).
  */
 sealed class AsyncInitializerStrategy {
     object Concurrent : AsyncInitializerStrategy()

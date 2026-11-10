@@ -60,8 +60,8 @@ interface StartupSyncInitializer<T : Any> {
      * `Main`, `Unconfined`, or custom, so async execution is dispatcher-controlled rather than guaranteed
      * to use a different thread.
      *
-     * To detect accidental I/O during development, call
-     * `AppStartupInitializer.enableStrictModeCheck(BuildConfig.DEBUG)` from
+     * To detect accidental I/O during development, enable
+     * `AppStartupInitializer.configure { strictModeCheckEnabled = BuildConfig.DEBUG }` from
      * [android.app.Application.attachBaseContext]. Violations appear in logcat.
      *
      * @param context The application context.
